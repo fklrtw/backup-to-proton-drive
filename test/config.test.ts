@@ -1,0 +1,471 @@
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { after, before, describe, it } from 'node:test';
+
+import {
+  normalizeRemoteDirectory,
+  parseApplicationConfiguration,
+  readSecretOrEnvironmentVariable,
+  splitMappingSpecification,
+} from '../src/config.ts';
+
+describe('configuration parsing', () => {
+  let temporaryRoot = '';
+  let localDirectoryOne = '';
+  let localDirectoryTwo = '';
+  let dataDirectory = '';
+  let encryptionKeyFilePath = '';
+
+  before(() => {
+    temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'proton-backup-config-test-'));
+    localDirectoryOne = path.join(temporaryRoot, 'local-one');
+    localDirectoryTwo = path.join(temporaryRoot, 'local-two');
+    dataDirectory = path.join(temporaryRoot, 'data');
+    encryptionKeyFilePath = path.join(temporaryRoot, 'data-encryption.key');
+    fs.mkdirSync(localDirectoryOne, { recursive: true });
+    fs.mkdirSync(localDirectoryTwo, { recursive: true });
+    fs.mkdirSync(dataDirectory, { recursive: true });
+    fs.writeFileSync(encryptionKeyFilePath, 'unit-test-master-encryption-key-at-least-32-bytes\n', 'utf8');
+  });
+
+  after(() => {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it('normalizes remote paths and allows Proton Drive root /', () => {
+    assert.equal(normalizeRemoteDirectory('/'), '/');
+    assert.equal(normalizeRemoteDirectory('///'), '/');
+    assert.equal(normalizeRemoteDirectory('/Backups/Docs/'), '/Backups/Docs');
+    assert.equal(normalizeRemoteDirectory('/Backups//Sub/../Docs/'), '/Backups/Docs');
+    assert.throws(() => normalizeRemoteDirectory('Backups/Docs'), /must be an absolute remote path/);
+  });
+
+  it('splits mapping specifications safely including paths containing colons', () => {
+    assert.deepEqual(splitMappingSpecification('/mnt/a:/Backups/A'), {
+      localDirectory: '/mnt/a',
+      remoteDirectory: '/Backups/A',
+    });
+    assert.deepEqual(splitMappingSpecification('/mnt/foo:bar:/Backups/Colon'), {
+      localDirectory: '/mnt/foo:bar',
+      remoteDirectory: '/Backups/Colon',
+    });
+    assert.deepEqual(splitMappingSpecification('C:\\Users\\Docs:/Backups/Docs'), {
+      localDirectory: 'C:\\Users\\Docs',
+      remoteDirectory: '/Backups/Docs',
+    });
+    assert.throws(() => splitMappingSpecification('invalid-without-colon'), /Invalid mapping specification/);
+  });
+
+  it('parses multiple --map CLI mappings, excludes, dry-run, and delete-empty-dirs', () => {
+    const configuration = parseApplicationConfiguration({
+      argv: [
+        '--map',
+        `${localDirectoryOne}:/Backups/One/`,
+        '--map',
+        `${localDirectoryTwo}:/Backups/Two`,
+        '--exclude',
+        '*.tmp',
+        '--exclude',
+        '.DS_Store',
+        '--dry-run',
+        '--delete-empty-dirs',
+        '--no-trash',
+        '--encryption-key-file',
+        encryptionKeyFilePath,
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(configuration.command, 'sync');
+    assert.equal(configuration.dryRun, true);
+    assert.ok(configuration.dataEncryptionKey);
+    assert.equal(configuration.allowPlaintextState, false);
+    assert.equal(configuration.mappings.length, 2);
+    assert.deepEqual(configuration.mappings[0], {
+      localDirectory: localDirectoryOne,
+      remoteDirectory: '/Backups/One',
+      excludePatterns: ['*.tmp', '.DS_Store'],
+      trashObsolete: false,
+      deleteEmptyRemoteDirectories: true,
+    });
+    assert.deepEqual(configuration.mappings[1], {
+      localDirectory: localDirectoryTwo,
+      remoteDirectory: '/Backups/Two',
+      excludePatterns: ['*.tmp', '.DS_Store'],
+      trashObsolete: false,
+      deleteEmptyRemoteDirectories: true,
+    });
+  });
+
+  it('parses SYNC_MAPPINGS both as delimited string and as JSON array', () => {
+    const delimitedConfig = parseApplicationConfiguration({
+      argv: [],
+      environmentVariables: {
+        SYNC_MAPPINGS: `${localDirectoryOne}:/R1; ${localDirectoryTwo}:/R2`,
+        EXCLUDE_PATTERNS: '*.bak, .git/',
+        DATA_ENCRYPTION_KEY_FILE: encryptionKeyFilePath,
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(delimitedConfig.mappings.length, 2);
+    assert.equal(delimitedConfig.mappings[0]?.remoteDirectory, '/R1');
+    assert.equal(delimitedConfig.mappings[1]?.remoteDirectory, '/R2');
+    assert.deepEqual(delimitedConfig.mappings[0]?.excludePatterns, ['*.bak', '.git/']);
+
+    const jsonConfig = parseApplicationConfiguration({
+      argv: [],
+      environmentVariables: {
+        DATA_ENCRYPTION_KEY_FILE: encryptionKeyFilePath,
+        SYNC_MAPPINGS: JSON.stringify([
+          {
+            localDir: localDirectoryOne,
+            remoteDir: '/JsonOne',
+            exclude: ['cache/'],
+            trashObsolete: false,
+          },
+          {
+            localDirectory: localDirectoryTwo,
+            remoteDirectory: '/JsonTwo',
+            deleteEmptyRemoteDirectories: true,
+          },
+        ]),
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(jsonConfig.mappings.length, 2);
+    assert.equal(jsonConfig.mappings[0]?.trashObsolete, false);
+    assert.deepEqual(jsonConfig.mappings[0]?.excludePatterns, ['cache/']);
+    assert.equal(jsonConfig.mappings[1]?.deleteEmptyRemoteDirectories, true);
+  });
+
+  it('parses YAML configuration files and merges CLI overrides cleanly', () => {
+    const yamlFilePath = path.join(temporaryRoot, 'config.yaml');
+    fs.writeFileSync(
+      yamlFilePath,
+      [
+        'dryRun: false',
+        'deleteEmptyRemoteDirectories: true',
+        `encryptionKeyFile: "${encryptionKeyFilePath}"`,
+        'exclude:',
+        '  - ".DS_Store"',
+        'mappings:',
+        `  - localDirectory: "${localDirectoryOne}"`,
+        '    remoteDirectory: "/Yaml/One"',
+        '    exclude:',
+        '      - "*.swp"',
+        `  - "${localDirectoryTwo}:/Yaml/Two"`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const configuration = parseApplicationConfiguration({
+      argv: ['--config', yamlFilePath, '--exclude', '*.log', '--dry-run'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(configuration.dryRun, true);
+    assert.ok(configuration.dataEncryptionKey);
+    assert.equal(configuration.mappings.length, 2);
+    assert.deepEqual(configuration.mappings[0]?.excludePatterns, ['.DS_Store', '*.log', '*.swp']);
+    assert.equal(configuration.mappings[0]?.deleteEmptyRemoteDirectories, true);
+    assert.equal(configuration.mappings[1]?.remoteDirectory, '/Yaml/Two');
+  });
+
+  it('supports legacy positional, --local-dir/--remote-dir, and LOCAL_DIR/REMOTE_DIR formats', () => {
+    const positionalConfig = parseApplicationConfiguration({
+      argv: [localDirectoryOne, '/LegacyPos', '--encryption-key-file', encryptionKeyFilePath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(positionalConfig.mappings[0]?.localDirectory, localDirectoryOne);
+    assert.equal(positionalConfig.mappings[0]?.remoteDirectory, '/LegacyPos');
+
+    const mixedConfig = parseApplicationConfiguration({
+      argv: ['--local-dir', localDirectoryOne, '/MixedPos', '--allow-plaintext-state'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(mixedConfig.mappings[0]?.remoteDirectory, '/MixedPos');
+    assert.equal(mixedConfig.allowPlaintextState, true);
+
+    const envConfig = parseApplicationConfiguration({
+      argv: [],
+      environmentVariables: {
+        LOCAL_DIR: localDirectoryTwo,
+        REMOTE_DIR: '/LegacyEnv',
+        ALLOW_PLAINTEXT_STATE: 'true',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(envConfig.mappings[0]?.localDirectory, localDirectoryTwo);
+    assert.equal(envConfig.mappings[0]?.remoteDirectory, '/LegacyEnv');
+    assert.equal(envConfig.allowPlaintextState, true);
+  });
+
+  it('reads Docker/Podman *_FILE secret files while trimming single trailing newlines', () => {
+    const secretFilePath = path.join(temporaryRoot, 'proton_password.txt');
+    fs.writeFileSync(secretFilePath, 'super-secret-value\n', 'utf8');
+
+    const resolvedSecret = readSecretOrEnvironmentVariable(
+      {
+        PROTON_PASSWORD: 'ignored-fallback',
+        PROTON_PASSWORD_FILE: secretFilePath,
+      },
+      'PROTON_PASSWORD',
+    );
+    assert.equal(resolvedSecret, 'super-secret-value');
+  });
+
+  it('rejects missing local directories, overlapping remote targets, and handles login/help commands', () => {
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            '--map',
+            `${path.join(temporaryRoot, 'does-not-exist')}:/Remote`,
+            '--encryption-key-file',
+            encryptionKeyFilePath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Local directory does not exist/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            '--map',
+            `${localDirectoryOne}:/Backups/Parent`,
+            '--map',
+            `${localDirectoryTwo}:/Backups/Parent/Child`,
+            '--encryption-key-file',
+            encryptionKeyFilePath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Overlapping remoteDirectory paths/,
+    );
+
+    const loginConfig = parseApplicationConfiguration({
+      argv: [
+        'login',
+        '--session-file',
+        path.join(dataDirectory, 'custom-session.json'),
+        '--encryption-key-file',
+        encryptionKeyFilePath,
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(loginConfig.command, 'login');
+    assert.equal(loginConfig.mappings.length, 0);
+    assert.equal(loginConfig.sessionFilePath, path.join(dataDirectory, 'custom-session.json'));
+
+    const helpConfig = parseApplicationConfiguration({
+      argv: ['--help'],
+      environmentVariables: {},
+    });
+    assert.equal(helpConfig.command, 'help');
+  });
+
+  it('parses concurrency and small-file upload options with validation', () => {
+    const configuredFromFlags = parseApplicationConfiguration({
+      argv: [
+        '--map',
+        `${localDirectoryOne}:/PerfOne`,
+        '--concurrency',
+        '7',
+        '--small-file-upload',
+        '--encryption-key-file',
+        encryptionKeyFilePath,
+      ],
+      environmentVariables: {
+        LOCAL_HASH_CONCURRENCY: '12',
+        REMOTE_SCAN_CONCURRENCY: '9',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(configuredFromFlags.uploadConcurrency, 7);
+    assert.equal(configuredFromFlags.localHashConcurrency, 12);
+    assert.equal(configuredFromFlags.remoteScanConcurrency, 9);
+    assert.equal(configuredFromFlags.enableSmallFileUpload, true);
+
+    const yamlConfigPath = path.join(temporaryRoot, 'perf-config.yaml');
+    fs.writeFileSync(
+      yamlConfigPath,
+      [
+        'uploadConcurrency: 3',
+        'localHashConcurrency: 4',
+        'remoteScanConcurrency: 2',
+        'enableSmallFileUpload: true',
+        'allowPlaintextState: true',
+        'mappings:',
+        `  - "${localDirectoryOne}:/YamlPerf"`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const configuredFromYaml = parseApplicationConfiguration({
+      argv: ['--config', yamlConfigPath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(configuredFromYaml.uploadConcurrency, 3);
+    assert.equal(configuredFromYaml.localHashConcurrency, 4);
+    assert.equal(configuredFromYaml.remoteScanConcurrency, 2);
+    assert.equal(configuredFromYaml.enableSmallFileUpload, true);
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            '--map',
+            `${localDirectoryOne}:/BadConcurrency`,
+            '--concurrency',
+            '99',
+            '--encryption-key-file',
+            encryptionKeyFilePath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Option --concurrency must be an integer between 1 and 32/,
+    );
+  });
+
+  it('enforces mandatory at-rest encryption key file policy and rejects raw DATA_ENCRYPTION_KEY env vars', () => {
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['--map', `${localDirectoryOne}:/MissingKey`],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /At-rest encryption key is required/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['login'],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /At-rest encryption key is required/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['--map', `${localDirectoryOne}:/RawEnvRejected`],
+          environmentVariables: {
+            DATA_ENCRYPTION_KEY: 'raw-env-key-should-be-blocked-for-docker-inspect-safety',
+          },
+          defaultDataDirectory: dataDirectory,
+        }),
+      /DATA_ENCRYPTION_KEY environment variable is not supported/,
+    );
+
+    const shortKeyPath = path.join(temporaryRoot, 'short.key');
+    fs.writeFileSync(shortKeyPath, 'short-key\n', 'utf8');
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            '--map',
+            `${localDirectoryOne}:/ShortKey`,
+            '--encryption-key-file',
+            shortKeyPath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /too short/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            '--map',
+            `${localDirectoryOne}:/MissingFile`,
+            '--encryption-key-file',
+            path.join(temporaryRoot, 'nonexistent.key'),
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Encryption key file does not exist/,
+    );
+  });
+
+  it('parses verbose option across CLI flag, environment variable, and YAML configuration with validation', () => {
+    const defaultConfiguration = parseApplicationConfiguration({
+      argv: ['--map', `${localDirectoryOne}:/VerboseDefault`, '--allow-plaintext-state'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(defaultConfiguration.verbose, false);
+
+    const cliVerboseConfiguration = parseApplicationConfiguration({
+      argv: ['--map', `${localDirectoryOne}:/VerboseCli`, '-v', '--allow-plaintext-state'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(cliVerboseConfiguration.verbose, true);
+
+    const environmentVerboseConfiguration = parseApplicationConfiguration({
+      argv: [],
+      environmentVariables: {
+        SYNC_MAPPINGS: `${localDirectoryOne}:/VerboseEnv`,
+        VERBOSE: 'true',
+        ALLOW_PLAINTEXT_STATE: 'true',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(environmentVerboseConfiguration.verbose, true);
+
+    const yamlVerbosePath = path.join(temporaryRoot, 'verbose-config.yaml');
+    fs.writeFileSync(
+      yamlVerbosePath,
+      ['verbose: true', 'allowPlaintextState: true', 'mappings:', `  - "${localDirectoryOne}:/VerboseYaml"`].join(
+        '\n',
+      ),
+      'utf8',
+    );
+    const yamlVerboseConfiguration = parseApplicationConfiguration({
+      argv: ['--config', yamlVerbosePath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(yamlVerboseConfiguration.verbose, true);
+
+    const invalidVerboseYamlPath = path.join(temporaryRoot, 'invalid-verbose-config.yaml');
+    fs.writeFileSync(
+      invalidVerboseYamlPath,
+      ['verbose: "yes"', 'allowPlaintextState: true', 'mappings:', `  - "${localDirectoryOne}:/BadVerboseYaml"`].join(
+        '\n',
+      ),
+      'utf8',
+    );
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['--config', invalidVerboseYamlPath],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Configuration field "verbose" must be a boolean/,
+    );
+  });
+});

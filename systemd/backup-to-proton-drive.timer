@@ -1,0 +1,10 @@
+[Unit]
+Description=Scheduled daily one-shot backup sync to Proton Drive
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

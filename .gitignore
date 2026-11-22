@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+.idea/
+.env
+.env.*
+*.log
+.proton-drive-*.json
+secrets/
+config.yaml
+config.json
+!config.example.yaml

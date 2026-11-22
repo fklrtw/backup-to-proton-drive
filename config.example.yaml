@@ -1,0 +1,43 @@
+# Example YAML configuration for backup-to-proton-drive
+# Mount into the container at /config/config.yaml and set CONFIG_FILE=/config/config.yaml
+
+dryRun: false
+verbose: false
+trashObsolete: true
+deleteEmptyRemoteDirectories: false
+
+# Concurrency & transfer tuning
+uploadConcurrency: 5
+localHashConcurrency: 8
+remoteScanConcurrency: 6
+enableSmallFileUpload: false
+
+# Global exclude patterns merged into every mapping
+exclude:
+  - ".DS_Store"
+  - "Thumbs.db"
+  - "*.tmp"
+  - "*.swp"
+
+# Persistent files inside the mounted /data volume and at-rest AES-256-GCM encryption
+sessionFile: /data/session.json
+stateFile: /data/state.json
+encryptionKeyFile: /run/secrets/data_encryption_key
+allowPlaintextState: false
+
+# Multi-directory sync mappings: L1 -> R1, L2 -> R2, ...
+mappings:
+  - localDirectory: /backups/documents
+    remoteDirectory: /Backups/Documents
+    exclude:
+      - "cache/"
+    trashObsolete: true
+    deleteEmptyRemoteDirectories: true
+
+  - localDirectory: /backups/photos
+    remoteDirectory: /Backups/Photos
+    trashObsolete: false
+    deleteEmptyRemoteDirectories: false
+
+  # Shorthand "local:remote" string syntax is also supported:
+  # - "/backups/archives:/Backups/Archives"

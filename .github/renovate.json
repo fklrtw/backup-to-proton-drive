@@ -1,0 +1,93 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Automated dependency updates for backup-to-proton-drive via the Mend Renovate GitHub App. Pins Docker and GitHub Action digests, keeps Node.js on 26.x, enforces a 3-day npm release cooldown, runs weekly, and requires manual PR review.",
+  "extends": [
+    "config:recommended",
+    ":pinAllExceptPeerDependencies",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "dependencyDashboard": true,
+  "automerge": false,
+  "timezone": "UTC",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "dependencies",
+      "security"
+    ],
+    "schedule": [
+      "at any time"
+    ]
+  },
+  "docker-compose": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": "Wait 3 days after npm package publication before raising PRs to reduce supply-chain risk from compromised or quickly yanked releases.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Keep Node.js runtime images, Node engines, and @types/node aligned with Node.js 26.x until an intentional runtime upgrade.",
+      "matchPackageNames": [
+        "node",
+        "docker.io/library/node",
+        "@types/node"
+      ],
+      "allowedVersions": ">=26.0.0 <27.0.0"
+    },
+    {
+      "description": "Group @protontech/drive-sdk and @protontech/crypto updates into one PR so tightly coupled Proton SDK and OpenPGP cryptographic updates are typechecked and tested together.",
+      "matchDatasources": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "/^@protontech\\//"
+      ],
+      "groupName": "Proton SDK & Crypto",
+      "labels": [
+        "dependencies",
+        "proton-sdk"
+      ]
+    },
+    {
+      "description": "Group non-major npm devDependency updates (build and typecheck tooling) into a single weekly PR while keeping major versions separate for careful review.",
+      "matchManagers": [
+        "npm"
+      ],
+      "matchDepTypes": [
+        "devDependencies"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "npm devDependencies (non-major)"
+    },
+    {
+      "description": "Group GitHub Actions workflow digest and version updates into a single weekly PR to avoid workflow PR noise.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    }
+  ]
+}

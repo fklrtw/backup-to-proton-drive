@@ -1,0 +1,69 @@
+services:
+  backup:
+    image: ghcr.io/fklrtw/backup-to-proton-drive:latest
+    # Uncomment to build locally instead of pulling from GHCR:
+    # build: .
+    container_name: backup-to-proton-drive
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # Multi-mapping list: L1 -> R1, L2 -> R2, ...
+      SYNC_MAPPINGS: "/backups/documents:/Backups/Documents,/backups/photos:/Backups/Photos"
+      EXCLUDE_PATTERNS: "*.tmp,*.swp,.DS_Store,Thumbs.db"
+      DELETE_EMPTY_DIRS: "false"
+      TRASH_OBSOLETE: "true"
+      DRY_RUN: "false"
+      # VERBOSE: "false"
+      # Mandatory at-rest AES-256-GCM encryption key file for /data/session.json and /data/state.json:
+      DATA_ENCRYPTION_KEY_FILE: /run/secrets/data_encryption_key
+      # Only set ALLOW_PLAINTEXT_STATE="true" if you intentionally disable at-rest encryption:
+      # ALLOW_PLAINTEXT_STATE: "false"
+      # Concurrency tuning (defaults shown):
+      # UPLOAD_CONCURRENCY: "5"
+      # LOCAL_HASH_CONCURRENCY: "8"
+      # REMOTE_SCAN_CONCURRENCY: "6"
+      # ENABLE_SMALL_FILE_UPLOAD: "false"
+      # Optional: point to a mounted YAML/JSON configuration file instead of SYNC_MAPPINGS:
+      # CONFIG_FILE: /config/config.yaml
+      #
+      # Optional headless login credentials (used automatically if /data/session.json
+      # does not exist yet or expires; omit when using interactive `login` once):
+      # PROTON_USERNAME: your-account@proton.me
+      # PROTON_PASSWORD_FILE: /run/secrets/proton_password
+      # PROTON_TOTP_SECRET_FILE: /run/secrets/proton_totp_secret
+      # PROTON_MAILBOX_PASSWORD_FILE: /run/secrets/proton_mailbox_password
+    volumes:
+      # Persistent volume storing /data/session.json and /data/state.json (event cursor cache)
+      - proton_backup_data:/data
+      # Read-only source directories matching L1, L2, ... in SYNC_MAPPINGS
+      - ./example-data/documents:/backups/documents:ro
+      - ./example-data/photos:/backups/photos:ro
+      # Optional YAML/JSON config file:
+      # - ./config.yaml:/config/config.yaml:ro
+    secrets:
+      - data_encryption_key
+      # Optional headless Proton credentials:
+      # - proton_password
+      # - proton_totp_secret
+      # - proton_mailbox_password
+
+volumes:
+  proton_backup_data:
+
+secrets:
+  # Create with: mkdir -p secrets && openssl rand -base64 32 > ./secrets/data_encryption_key.txt && chmod 0400 ./secrets/data_encryption_key.txt
+  # Note for Docker Compose: ensure the container UID 1000 (`node`) can read the secret file.
+  data_encryption_key:
+    file: ./secrets/data_encryption_key.txt
+  # proton_password:
+  #   file: ./secrets/proton_password.txt
+  # proton_totp_secret:
+  #   file: ./secrets/proton_totp_secret.txt
+  # proton_mailbox_password:
+  #   file: ./secrets/proton_mailbox_password.txt

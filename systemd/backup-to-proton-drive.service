@@ -1,0 +1,30 @@
+[Unit]
+Description=One-shot backup sync to Proton Drive via Compose
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust WorkingDirectory to the folder containing your compose.yaml
+WorkingDirectory=/opt/backup-to-proton-drive
+
+# Optional host-sealed at-rest encryption key using systemd-creds (recommended on systemd >= 250):
+#   1. Create encrypted credential on the host (TPM2 / host-key sealed):
+#        umask 077
+#        openssl rand -base64 32 | systemd-creds encrypt --name=data_encryption_key - /etc/credstore.encrypted/backup-to-proton-drive.key.cred
+#   2. Uncomment LoadCredentialEncrypted below.
+#   3. With rootless Podman running as this service user, $CREDENTIALS_DIRECTORY/data_encryption_key
+#      can be mounted into the container (or passed via `--mount type=bind,src=${CREDENTIALS_DIRECTORY}/data_encryption_key,dst=/run/secrets/data_encryption_key,ro`).
+#      With Docker Engine / Docker Compose running the container as UID 1000 (`node`), ensure
+#      either the secret file under ./secrets/data_encryption_key.txt or your mounted credential
+#      is readable by container UID 1000 (`node`).
+# LoadCredentialEncrypted=data_encryption_key:/etc/credstore.encrypted/backup-to-proton-drive.key.cred
+
+# Docker Compose (for Podman, replace with: /usr/bin/podman compose run --rm backup)
+ExecStart=/usr/bin/docker compose run --rm backup
+TimeoutStartSec=2h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

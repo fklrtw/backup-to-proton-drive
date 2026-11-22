@@ -1,0 +1,21 @@
+{
+  // `@protontech/crypto` exposes raw `.ts` source files via `exports`, which `skipLibCheck`
+  // does not exclude. Keeping `strict: true` without `noUncheckedIndexedAccess` or
+  // `exactOptionalPropertyTypes` prevents compiler failures inside `node_modules/@protontech/crypto/src`.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noUncheckedSideEffectImports": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
