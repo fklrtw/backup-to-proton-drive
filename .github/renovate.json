@@ -7,7 +7,9 @@
     "docker:pinDigests",
     "helpers:pinGitHubActionDigests"
   ],
-  "dependencyDashboard": true,
+  "dependencyDashboard": {
+    "enabled": true
+  },
   "automerge": false,
   "timezone": "UTC",
   "schedule": [
