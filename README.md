@@ -17,7 +17,7 @@ One-way, SHA1-verified backup synchronization from one or more local directories
 - **Zero-Bandwidth Rename & Move Detection**: Matches deleted/added local paths by SHA1 digest + node UID and executes remote `renameNode` / `moveNodes` instead of re-uploading moved or renamed files.
 - **File Version History & Streaming SHA1**: Uploads modified files via `getFileRevisionUploader` (creating clean revisions) and hashes local files via Node.js streams without buffering multi-GB files into RAM.
 - **Glob Excludes, Dry-Run & Batched Cleanup**: Supports `.gitignore`-style exclude globs (`--exclude` / `EXCLUDE_PATTERNS` / config file), `--dry-run` previews, batched `trashNodes` cleanup, and optional `--delete-empty-dirs` pruning.
-- **Hardened Container & Supply Chain**: Multi-stage digest-pinned `node:26-slim` image running as non-root `node`, supporting `read_only: true`, Docker/Podman secrets (`*_FILE`), exact-pinned npm dependencies, SHA-pinned GitHub Actions, `harden-runner` egress blocking, SLSA image provenance attestations, and multi-arch (`linux/amd64`, `linux/arm64`) publishing to GHCR (`ghcr.io`).
+- **Hardened Container & Supply Chain**: Multi-stage digest-pinned `node:26-slim` image running as non-root `node`, supporting `read_only: true`, Docker/Podman secrets (`*_FILE`), exact-pinned npm dependencies, SHA-pinned GitHub Actions, `harden-runner` egress auditing, SLSA image provenance attestations, and multi-arch (`linux/amd64`, `linux/arm64`) publishing to GHCR (`ghcr.io`).
 
 ---
 
@@ -123,8 +123,8 @@ Mappings are resolved in the following priority order:
 
 ## GitHub Actions, Security Hardening & GHCR Publishing
 
-- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs with top-level `permissions: {}` (`contents: read` on `verify`), `persist-credentials: false`, `step-security/harden-runner` in `egress-policy: block` mode, SHA-pinned Actions, [`.node-version`](./.node-version) pinning, and `npm ci --ignore-scripts` followed by `typecheck`, `build`, and `test`.
-- [`.github/workflows/docker-publish.yml`](./.github/workflows/docker-publish.yml) gates multi-arch (`linux/amd64`, `linux/arm64`) publishing behind a passing `verify` job (`needs: verify`), pins all Actions by full 40-character commit SHA and [`Dockerfile`](./Dockerfile) base images by `sha256` digest, blocks unauthorized runner egress with `harden-runner`, publishes to `ghcr.io/fklrtw/backup-to-proton-drive`, and attaches Sigstore SLSA build provenance attestations via `actions/attest-build-provenance`:
+- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs with top-level `permissions: {}` (`contents: read` on `verify`), `persist-credentials: false`, `step-security/harden-runner` in `egress-policy: audit` mode, SHA-pinned Actions, [`.node-version`](./.node-version) pinning, and `npm ci --ignore-scripts` followed by `typecheck`, `build`, and `test`.
+- [`.github/workflows/docker-publish.yml`](./.github/workflows/docker-publish.yml) gates multi-arch (`linux/amd64`, `linux/arm64`) publishing behind a passing `verify` job (`needs: verify`), pins all Actions by full 40-character commit SHA and [`Dockerfile`](./Dockerfile) base images by `sha256` digest, audits runner egress with `harden-runner`, publishes to `ghcr.io/fklrtw/backup-to-proton-drive`, and attaches Sigstore SLSA build provenance attestations via `actions/attest-build-provenance`:
   ```bash
   gh attestation verify oci://ghcr.io/fklrtw/backup-to-proton-drive:latest --owner fklrtw
   ```

@@ -69,14 +69,15 @@ function assertAllActionsShaPinned(workflowFileName: string, workflowContent: st
 }
 
 describe('GitHub security hardening, exact pinning, and attribution', () => {
-  it('enforces SHA pinning, minimal permissions, persist-credentials=false, harden-runner block mode, and npm ci --ignore-scripts in ci.yml', () => {
+  it('enforces SHA pinning, minimal permissions, persist-credentials=false, harden-runner audit mode, and npm ci --ignore-scripts in ci.yml', () => {
     const ciWorkflowContent = fileSystem.readFileSync(
       path.resolve('.github', 'workflows', 'ci.yml'),
       'utf8',
     );
 
     assert.match(ciWorkflowContent, /^permissions:\s*\{\}/m);
-    assert.match(ciWorkflowContent, /egress-policy:\s*block/);
+    assert.match(ciWorkflowContent, /egress-policy:\s*audit/);
+    assert.doesNotMatch(ciWorkflowContent, /allowed-endpoints:/);
     assert.match(ciWorkflowContent, /persist-credentials:\s*false/);
     assert.match(ciWorkflowContent, /node-version-file:\s*\.node-version/);
     assert.match(ciWorkflowContent, /npm ci --ignore-scripts/);
@@ -87,7 +88,7 @@ describe('GitHub security hardening, exact pinning, and attribution', () => {
     assert.equal(persistFalseMatches.length, checkoutCount);
   });
 
-  it('gates docker-publish.yml behind verify, pins all actions, blocks egress, and generates SLSA provenance', () => {
+  it('gates docker-publish.yml behind verify, pins all actions, audits egress, and generates SLSA provenance', () => {
     const publishWorkflowContent = fileSystem.readFileSync(
       path.resolve('.github', 'workflows', 'docker-publish.yml'),
       'utf8',
@@ -102,8 +103,9 @@ describe('GitHub security hardening, exact pinning, and attribution', () => {
     assert.match(publishWorkflowContent, /node-version-file:\s*\.node-version/);
     assert.match(publishWorkflowContent, /npm ci --ignore-scripts/);
 
-    const hardenBlockMatches = publishWorkflowContent.match(/egress-policy:\s*block/g) ?? [];
-    assert.equal(hardenBlockMatches.length, 2, 'Both verify and build-and-push jobs must block egress.');
+    const hardenAuditMatches = publishWorkflowContent.match(/egress-policy:\s*audit/g) ?? [];
+    assert.equal(hardenAuditMatches.length, 2, 'Both verify and build-and-push jobs must audit egress.');
+    assert.doesNotMatch(publishWorkflowContent, /allowed-endpoints:/);
 
     const usesLines = assertAllActionsShaPinned('docker-publish.yml', publishWorkflowContent);
     const checkoutCount = usesLines.filter((line) => line.includes('actions/checkout@')).length;
