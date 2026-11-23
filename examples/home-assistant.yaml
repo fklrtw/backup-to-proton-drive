@@ -1,0 +1,113 @@
+# Home Assistant Package Reference for monitoring `backup-to-proton-drive status-server`.
+#
+# Setup:
+# 1. Start the companion `status` service from compose.yaml (`docker compose up -d`).
+# 2. Replace `192.168.1.50` below with the LAN IP or hostname of your backup host.
+# 3. Include this file as a package in Home Assistant `configuration.yaml`:
+#      homeassistant:
+#        packages:
+#          proton_backup: !include packages/proton_backup.yaml
+#    (or merge the top-level `rest:`, `template:`, and `automation:` blocks directly).
+# 4. Restart Home Assistant.
+
+rest:
+  - resource: http://192.168.1.50:9108/status
+    scan_interval: 300
+    timeout: 15
+    binary_sensor:
+      # Exposed natively with `device_class: problem` (`on` = Problem, `off` = Clear).
+      # Note: `ageHours` and `checkedAt` are intentionally omitted from json_attributes because
+      # they change on every poll and would unnecessarily inflate the Home Assistant recorder database.
+      - name: "Proton Backup Problem"
+        unique_id: proton_backup_problem
+        device_class: problem
+        value_template: "{{ value_json.problem }}"
+        json_attributes:
+          - status
+          - overdue
+          - running
+          - lastRunAt
+          - lastSuccessAt
+          - durationSeconds
+          - errorMessage
+          - summary
+    sensor:
+      # Timestamp sensor showing when the last backup with complete local uploads finished.
+      - name: "Proton Backup Last Success"
+        unique_id: proton_backup_last_success
+        device_class: timestamp
+        value_template: "{{ value_json.lastSuccessAt }}"
+
+template:
+  - binary_sensor:
+      # Wraps `binary_sensor.proton_backup_problem` so losing LAN reachability to status-server
+      # (`unavailable` or `unknown`) ALSO raises `on` ("Problem") in your Maintenance dashboard.
+      - name: "Proton Backup Needs Attention"
+        unique_id: proton_backup_needs_attention
+        device_class: problem
+        state: >
+          {{ not is_state('binary_sensor.proton_backup_problem', 'off') }}
+
+automation:
+  - id: proton_backup_problem_notify
+    alias: "Proton Backup: Notify when backup needs attention"
+    mode: single
+    triggers:
+      # Wait 10 minutes before alerting so host reboots or brief container updates do not false-trigger.
+      - trigger: state
+        entity_id: binary_sensor.proton_backup_needs_attention
+        to: "on"
+        for:
+          minutes: 10
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: proton_backup_problem
+          title: "Proton Drive Backup Needs Attention"
+          message: >
+            {% set backup_state = state_attr('binary_sensor.proton_backup_problem', 'status') %}
+            {% set is_overdue = state_attr('binary_sensor.proton_backup_problem', 'overdue') %}
+            {% set last_success = state_attr('binary_sensor.proton_backup_problem', 'lastSuccessAt') %}
+            {% set error_detail = state_attr('binary_sensor.proton_backup_problem', 'errorMessage') %}
+            {% if states('binary_sensor.proton_backup_problem') in ['unavailable', 'unknown'] %}
+            Backup status endpoint is unreachable (`{{ states('binary_sensor.proton_backup_problem') }}`).
+            {% else %}
+            Status: `{{ backup_state }}` | Overdue: `{{ is_overdue }}`
+            Last success: {{ last_success or 'never' }}
+            {% if error_detail %}Error: {{ error_detail }}{% endif %}
+            {% endif %}
+      # Optional: also push a mobile notification via the Home Assistant Companion App:
+      # - action: notify.mobile_app_your_phone
+      #   data:
+      #     title: "Proton Drive Backup Needs Attention"
+      #     message: >
+      #       Status: {{ state_attr('binary_sensor.proton_backup_problem', 'status') or 'unreachable' }}
+      #       {{ state_attr('binary_sensor.proton_backup_problem', 'errorMessage') or '' }}
+
+  - id: proton_backup_problem_dismiss
+    alias: "Proton Backup: Dismiss notification when healthy"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.proton_backup_needs_attention
+        to: "off"
+    actions:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: proton_backup_problem
+
+# Optional Lovelace Maintenance Dashboard Card (hidden automatically when healthy):
+#
+# type: conditional
+# conditions:
+#   - condition: state
+#     entity: binary_sensor.proton_backup_needs_attention
+#     state: "on"
+# card:
+#   type: entities
+#   title: "Backup Alerts"
+#   entities:
+#     - entity: binary_sensor.proton_backup_needs_attention
+#       name: "Proton Drive Backup"
+#     - entity: sensor.proton_backup_last_success
+#       name: "Last Successful Backup"

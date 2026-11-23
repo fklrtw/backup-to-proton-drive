@@ -6,6 +6,8 @@ import {
   runInteractiveLogin,
 } from './proton/auth.ts';
 import { SdkProtonDriveAdapter } from './proton/client.ts';
+import { markSyncRunStarted, recordSyncCompletion, recordSyncFailure } from './runStatus.ts';
+import { startStatusServer } from './statusServer.ts';
 import { executeSyncRun } from './syncRunner.ts';
 
 /**
@@ -18,12 +20,52 @@ const resolvedApplicationVersion =
   typeof __APPLICATION_VERSION__ !== 'undefined' ? __APPLICATION_VERSION__ : '0.1.0';
 
 /**
+ * Executes a non-fatal status file update while logging unexpected filesystem errors to `stderr`
+ * so telemetry persistence problems never abort an otherwise healthy backup operation.
+ *
+ * @param updateOperation - Status persistence callback to run.
+ * @param operationDescription - Short context label included in warning output on error.
+ */
+function tryUpdateStatusFile(updateOperation: () => void, operationDescription: string): void {
+  try {
+    updateOperation();
+  } catch (statusError) {
+    const statusErrorMessage =
+      statusError instanceof Error ? statusError.message : String(statusError);
+    console.error(`Warning: failed to ${operationDescription}: ${statusErrorMessage}`);
+  }
+}
+
+/**
  * Prints non-sensitive startup diagnostics when `--verbose` / `VERBOSE=true` is enabled.
  * Passwords, tokens, TOTP secrets, and encryption key bytes are never logged.
  *
  * @param configuration - Parsed application configuration.
  */
 function logVerboseStartupSummary(configuration: ReturnType<typeof parseApplicationConfiguration>): void {
+  if (configuration.command === 'status-server') {
+    console.log('[verbose] Runtime configuration:');
+    console.table({
+      Command: configuration.command,
+      Version: configuration.applicationVersion,
+      'Status File': configuration.statusFilePath,
+      'Status Host': configuration.statusServerHost,
+      'Status Port': configuration.statusServerPort,
+      'Max Age Hours': configuration.statusMaxAgeHours,
+    });
+    return;
+  }
+
+  if (configuration.command === 'report-failure') {
+    console.log('[verbose] Runtime configuration:');
+    console.table({
+      Command: configuration.command,
+      Version: configuration.applicationVersion,
+      'Status File': configuration.statusFilePath,
+    });
+    return;
+  }
+
   const appVersionHeader = formatProtonAppVersionHeader(configuration.applicationVersion);
   const encryptionMode = configuration.dataEncryptionKey
     ? 'AES-256-GCM (HKDF-SHA256 key loaded from file)'
@@ -36,6 +78,7 @@ function logVerboseStartupSummary(configuration: ReturnType<typeof parseApplicat
     'API Host': configuration.apiBaseHost,
     'Session File': configuration.sessionFilePath,
     'State File': configuration.stateFilePath,
+    'Status File': configuration.statusFilePath,
     'Storage Protection': encryptionMode,
     'Dry Run': configuration.dryRun,
     'Upload Concurrency': configuration.uploadConcurrency,
@@ -61,8 +104,30 @@ function logVerboseStartupSummary(configuration: ReturnType<typeof parseApplicat
 }
 
 /**
- * Main CLI application entrypoint supporting `help`, interactive `login`, and one-shot
- * multi-mapping Proton Drive synchronization.
+ * Awaits an `AbortSignal` trigger so daemonized subcommands (`status-server`) can drain
+ * cleanly on `SIGINT` or `SIGTERM`.
+ *
+ * @param abortSignal - Cancellation signal registered with process signal handlers.
+ */
+function waitForAbortSignal(abortSignal: AbortSignal): Promise<void> {
+  if (abortSignal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    abortSignal.addEventListener(
+      'abort',
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * Main CLI application entrypoint supporting `help`, interactive `login`, read-only HTTP
+ * `status-server`, external `report-failure`, and one-shot multi-mapping Proton Drive sync.
  */
 async function main(): Promise<void> {
   const configuration = parseApplicationConfiguration({
@@ -78,6 +143,18 @@ async function main(): Promise<void> {
     logVerboseStartupSummary(configuration);
   }
 
+  if (configuration.command === 'report-failure') {
+    const recordedStatus = recordSyncFailure(
+      configuration.statusFilePath,
+      configuration.failureMessage ?? 'External failure reported',
+      null,
+    );
+    console.log(
+      `Recorded failure status in ${configuration.statusFilePath}: ${recordedStatus.errorMessage}`,
+    );
+    return;
+  }
+
   const abortController = new AbortController();
   let terminationExitCode: number | null = null;
 
@@ -87,7 +164,11 @@ async function main(): Promise<void> {
         process.exit(exitCode);
       }
       terminationExitCode = exitCode;
-      console.log(`\nReceived ${signalName}, aborting active transfers cleanly...`);
+      const shutdownDescription =
+        configuration.command === 'status-server'
+          ? 'shutting down status server'
+          : 'aborting active transfers';
+      console.log(`\nReceived ${signalName}, ${shutdownDescription} cleanly...`);
       abortController.abort(new Error(`Terminated by ${signalName}`));
     });
   };
@@ -95,25 +176,68 @@ async function main(): Promise<void> {
   registerSignalHandler('SIGINT', 130);
   registerSignalHandler('SIGTERM', 143);
 
+  if (configuration.command === 'status-server') {
+    const serverHandle = await startStatusServer({
+      statusFilePath: configuration.statusFilePath,
+      host: configuration.statusServerHost,
+      port: configuration.statusServerPort,
+      maxAgeHours: configuration.statusMaxAgeHours,
+      log: (message) => {
+        console.log(message);
+      },
+    });
+
+    await waitForAbortSignal(abortController.signal);
+    await serverHandle.close();
+
+    if (terminationExitCode !== null) {
+      process.exit(terminationExitCode);
+    }
+    return;
+  }
+
   try {
     if (configuration.command === 'login') {
       await runInteractiveLogin(configuration);
       return;
     }
 
-    const sessionManager = await ensureAuthenticatedSession(configuration);
-    const adapter = new SdkProtonDriveAdapter({
-      sessionManager,
-      apiBaseHost: configuration.apiBaseHost,
-      enableSmallFileUpload: configuration.enableSmallFileUpload,
-      debugLogging: configuration.verbose,
-    });
+    const syncRunStartedTimeMs = Date.now();
+    if (!configuration.dryRun) {
+      tryUpdateStatusFile(() => {
+        markSyncRunStarted(configuration.statusFilePath);
+      }, 'mark sync run started');
+    }
 
-    await executeSyncRun({
-      adapter,
-      configuration,
-      abortSignal: abortController.signal,
-    });
+    try {
+      const sessionManager = await ensureAuthenticatedSession(configuration);
+      const adapter = new SdkProtonDriveAdapter({
+        sessionManager,
+        apiBaseHost: configuration.apiBaseHost,
+        enableSmallFileUpload: configuration.enableSmallFileUpload,
+        debugLogging: configuration.verbose,
+      });
+
+      const overallSummary = await executeSyncRun({
+        adapter,
+        configuration,
+        abortSignal: abortController.signal,
+      });
+
+      if (!configuration.dryRun) {
+        tryUpdateStatusFile(() => {
+          recordSyncCompletion(configuration.statusFilePath, overallSummary);
+        }, 'write completion status');
+      }
+    } catch (syncError) {
+      if (!configuration.dryRun) {
+        const elapsedDurationSeconds = (Date.now() - syncRunStartedTimeMs) / 1000;
+        tryUpdateStatusFile(() => {
+          recordSyncFailure(configuration.statusFilePath, syncError, elapsedDurationSeconds);
+        }, 'write failure status');
+      }
+      throw syncError;
+    }
   } finally {
     await releaseProtonCrypto();
   }

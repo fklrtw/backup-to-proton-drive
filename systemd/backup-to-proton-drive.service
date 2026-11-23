@@ -1,7 +1,9 @@
 [Unit]
 Description=One-shot backup sync to Proton Drive via Compose
-After=network-online.target
+After=network-online.target docker.service
 Wants=network-online.target
+# Uncomment when using Docker Engine; leave commented for rootless Podman:
+# Requires=docker.service
 
 [Service]
 Type=oneshot
@@ -20,7 +22,9 @@ WorkingDirectory=/opt/backup-to-proton-drive
 #      is readable by container UID 1000 (`node`).
 # LoadCredentialEncrypted=data_encryption_key:/etc/credstore.encrypted/backup-to-proton-drive.key.cred
 
-# Docker Compose (for Podman, replace with: /usr/bin/podman compose run --rm backup)
+# Runs the `backup` service (which uses `profiles: ["backup"]` while `status` runs via `docker compose up -d`).
+# For pre-sync hooks with automatic failure telemetry (e.g. Paperless document_exporter), use examples/run-backup.sh instead.
+# For Podman, replace docker with /usr/bin/podman.
 ExecStart=/usr/bin/docker compose run --rm backup
 TimeoutStartSec=2h
 StandardOutput=journal

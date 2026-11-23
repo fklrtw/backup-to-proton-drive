@@ -4,6 +4,9 @@ services:
     # Uncomment to build locally instead of pulling from GHCR:
     # build: .
     container_name: backup-to-proton-drive
+    # Profile prevents `docker compose up -d` from running a backup; invoke via `docker compose run --rm backup`
+    profiles:
+      - backup
     restart: "no"
     read_only: true
     tmpfs:
@@ -20,6 +23,8 @@ services:
       TRASH_OBSOLETE: "true"
       DRY_RUN: "false"
       # VERBOSE: "false"
+      # Unencrypted run telemetry file shared read-only with the `status` companion container:
+      STATUS_FILE: /data/status.json
       # Mandatory at-rest AES-256-GCM encryption key file for /data/session.json and /data/state.json:
       DATA_ENCRYPTION_KEY_FILE: /run/secrets/data_encryption_key
       # Only set ALLOW_PLAINTEXT_STATE="true" if you intentionally disable at-rest encryption:
@@ -39,7 +44,7 @@ services:
       # PROTON_TOTP_SECRET_FILE: /run/secrets/proton_totp_secret
       # PROTON_MAILBOX_PASSWORD_FILE: /run/secrets/proton_mailbox_password
     volumes:
-      # Persistent volume storing /data/session.json and /data/state.json (event cursor cache)
+      # Persistent volume storing /data/session.json, /data/state.json, and /data/status.json
       - proton_backup_data:/data
       # Read-only source directories matching L1, L2, ... in SYNC_MAPPINGS
       - ./example-data/documents:/backups/documents:ro
@@ -52,6 +57,43 @@ services:
       # - proton_password
       # - proton_totp_secret
       # - proton_mailbox_password
+
+  # Lightweight read-only HTTP companion exposing /status and /health for Home Assistant or LAN monitoring
+  status:
+    image: ghcr.io/fklrtw/backup-to-proton-drive:latest
+    # Uncomment to build locally instead of pulling from GHCR:
+    # build: .
+    container_name: backup-to-proton-drive-status
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - status-server
+    ports:
+      # Expose unauthenticated LAN status endpoint on port 9108 (keep behind LAN/firewall, not public Internet)
+      - "9108:9108"
+    environment:
+      STATUS_FILE: /data/status.json
+      STATUS_MAX_AGE_HOURS: "26"
+    volumes:
+      # Mount only /data read-only; this companion never holds encryption keys or backup source folders
+      - proton_backup_data:/data:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:9108/status').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
 
 volumes:
   proton_backup_data:

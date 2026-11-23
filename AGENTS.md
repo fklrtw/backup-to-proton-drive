@@ -12,15 +12,17 @@ For full user-facing specifications, CLI precedence, and operational caveats, se
 
 | File / Directory | Purpose |
 | :--- | :--- |
-| [`src/index.ts`](./src/index.ts) | CLI entrypoint (`help`, `login`, `sync`), `SIGINT`/`SIGTERM` `AbortController`, and crypto cleanup |
-| [`src/types.ts`](./src/types.ts) | Core interfaces, configuration schemas, state types, and `ProtonDriveAdapter` contract |
-| [`src/config.ts`](./src/config.ts) | Multi-mapping parser (`--map`, `SYNC_MAPPINGS`, YAML/JSON config, legacy flags/env, `*_FILE` secrets) |
+| [`src/index.ts`](./src/index.ts) | CLI entrypoint (`help`, `login`, `sync`, `status-server`, `report-failure`), `SIGINT`/`SIGTERM` `AbortController`, and crypto cleanup |
+| [`src/types.ts`](./src/types.ts) | Core interfaces, configuration schemas, state types, run status types, and `ProtonDriveAdapter` contract |
+| [`src/config.ts`](./src/config.ts) | Multi-mapping parser (`--map`, `SYNC_MAPPINGS`, YAML/JSON config, legacy flags/env, `*_FILE` secrets, status options) |
 | [`src/concurrency.ts`](./src/concurrency.ts) | Fail-fast bounded-concurrency worker pool (`runWithConcurrency`) |
 | [`src/format.ts`](./src/format.ts) | Bounds-safe binary byte formatting (`formatBytes`) and MIME lookup (`inferMediaType`) |
 | [`src/ignore.ts`](./src/ignore.ts) | Zero-dependency glob exclude compiler and matcher (`compileExcludeMatcher`) |
 | [`src/localScanner.ts`](./src/localScanner.ts) | Async directory walker with exclude pruning and constant-RAM streaming SHA1 hashing |
 | [`src/diffEngine.ts`](./src/diffEngine.ts) | Pure deterministic planner: exact matches, 1-to-1 SHA1 move/rename matching, uploads, batched trash |
 | [`src/remoteState.ts`](./src/remoteState.ts) | Persistent remote state (`STATE_FILE`) and incremental `iterateEvents` synchronization |
+| [`src/runStatus.ts`](./src/runStatus.ts) | Atomic plaintext run telemetry (`status.json`), error sanitization, and staleness evaluation |
+| [`src/statusServer.ts`](./src/statusServer.ts) | Built-in read-only HTTP server (`status-server`) exposing `/status` and `/health` |
 | [`src/syncRunner.ts`](./src/syncRunner.ts) | Multi-mapping one-shot orchestrator executing plans (and `--dry-run`) via `ProtonDriveAdapter` |
 | [`src/proton/totp.ts`](./src/proton/totp.ts) | Base32 decoder and RFC 6238 HMAC-SHA1 TOTP code generator |
 | [`src/proton/sessionStore.ts`](./src/proton/sessionStore.ts) | Atomic `0600` persistence for Proton session tokens and salted key passphrases |
@@ -31,8 +33,9 @@ For full user-facing specifications, CLI precedence, and operational caveats, se
 | [`test/*.test.ts`](./test) | Automated unit, integration, and bundle smoke tests using `node:test` |
 | [`Dockerfile`](./Dockerfile) | Multi-stage digest-pinned `node:26-slim` non-root container image (`--platform=$BUILDPLATFORM` builder) |
 | [`.node-version`](./.node-version) | Pinned Node.js 26 toolchain version used by CI and Renovate |
-| [`compose.yaml`](./compose.yaml) / [`config.example.yaml`](./config.example.yaml) | Plug-and-play Docker/Podman Compose template and example YAML config |
+| [`compose.yaml`](./compose.yaml) / [`config.example.yaml`](./config.example.yaml) | Plug-and-play Docker/Podman Compose template (`backup` + `status` companion) and example YAML config |
 | [`systemd/`](./systemd) | Sample `oneshot` service and daily timer units for Compose + `systemd-creds` execution |
+| [`examples/`](./examples) | Reference orchestration wrapper (`run-backup.sh`) and Home Assistant monitoring package (`home-assistant.yaml`) |
 | [`.github/workflows/`](./.github/workflows) | SHA-pinned, `harden-runner`-protected CI and `verify`-gated GHCR publish + SLSA attestation workflows |
 | [`.github/renovate.json`](./.github/renovate.json) | Mend Renovate GitHub App configuration (digest pinning, exact npm pinning, Node 26 constraint, 3-day cooldown) |
 | [`LICENSE`](./LICENSE) | Full GNU GPLv3 license text (`GPL-3.0-or-later`) |
@@ -51,7 +54,7 @@ For full user-facing specifications, CLI precedence, and operational caveats, se
 1. **Node 26 native TypeScript test compatibility**:
    - `npm test` runs `node --test test/*.test.ts` directly without a separate test bundler.
    - **Never** use TypeScript `enum` declarations or constructor parameter properties (`constructor(private foo: Bar)`) in `src/` or `test/`, and always use explicit `.ts` extensions on relative imports so Node 26 type stripping works cleanly.
-   - Keep pure modules (`types.ts`, `concurrency.ts`, `config.ts`, `format.ts`, `ignore.ts`, `localScanner.ts`, `diffEngine.ts`, `remoteState.ts`, `storageEncryption.ts`, `syncRunner.ts`, `proton/totp.ts`, `proton/sessionStore.ts`) free of runtime imports from `@protontech/drive-sdk` or `@protontech/crypto`, because `@protontech/drive-sdk/dist/*.js` contains extensionless ESM imports and relies on `esbuild`. Only `src/proton/auth.ts`, `src/proton/client.ts`, and `src/index.ts` import `@protontech/*` at runtime.
+   - Keep pure modules (`types.ts`, `concurrency.ts`, `config.ts`, `format.ts`, `ignore.ts`, `localScanner.ts`, `diffEngine.ts`, `remoteState.ts`, `runStatus.ts`, `statusServer.ts`, `storageEncryption.ts`, `syncRunner.ts`, `proton/totp.ts`, `proton/sessionStore.ts`) free of runtime imports from `@protontech/drive-sdk` or `@protontech/crypto`, because `@protontech/drive-sdk/dist/*.js` contains extensionless ESM imports and relies on `esbuild`. Only `src/proton/auth.ts`, `src/proton/client.ts`, and `src/index.ts` import `@protontech/*` at runtime.
 
 2. **`@protontech/crypto` raw `.ts` exports & `tsconfig.json`**:
    - `@protontech/crypto` exposes raw TypeScript sources in `package.json` `"exports"`, so `tsc --noEmit` typechecks `node_modules/@protontech/crypto/src/` even with `"skipLibCheck": true`.

@@ -21,7 +21,7 @@
   - `@protontech/crypto` exposes raw `.ts` source files via `exports` and imports `"openpgp/lightweight"` (whose `package.json` `exports` map defines only `"browser"`).
   - [`scripts/build.mjs`](./scripts/build.mjs) uses `esbuild` with an `openpgpNodeResolvePlugin` redirecting `"openpgp/lightweight"` to `@protontech/openpgp`'s Node ESM build (`node_modules/openpgp/dist/node/openpgp.mjs`), outputting [`dist/index.js`](./dist/index.js) + sourcemap.
 - **Container Runtime ([`Dockerfile`](./Dockerfile))**:
-  - Multi-stage build pinned by `sha256` digest on `node:26-slim` (with `FROM --platform=$BUILDPLATFORM` on builder), non-root `USER node`, `/data` writable state volume (`0700`), `SESSION_FILE=/data/session.json`, `STATE_FILE=/data/state.json`. Compatible with `read_only: true` Compose deployments and one-shot systemd timer execution.
+  - Multi-stage build pinned by `sha256` digest on `node:26-slim` (with `FROM --platform=$BUILDPLATFORM` on builder), non-root `USER node`, `/data` writable state volume (`0700`), `SESSION_FILE=/data/session.json`, `STATE_FILE=/data/state.json`, `STATUS_FILE=/data/status.json`, optional `EXPOSE 9108` for `status-server`. Compatible with `read_only: true` Compose deployments and one-shot systemd timer execution.
 
 ---
 
@@ -52,6 +52,8 @@ Because `@protontech/drive-sdk` intentionally omits login/session flows, [`src/p
 ### Supported CLI Options & Subcommands
 
 - `login`: Interactive credential sign-in and session file persistence.
+- `status-server`: Unauthenticated read-only HTTP telemetry server exposing `/status` (`200` JSON) and `/health` (`200` healthy / `503` problem) for LAN monitoring and Home Assistant.
+- `report-failure`: Records an external pre-sync failure description (`--message` / positional / `FAILURE_MESSAGE`) into `STATUS_FILE` while preserving `lastSuccessAt`.
 - `--map <local>:<remote>` / `-m` (repeatable): Adds a `localDirectory -> remoteDirectory` mapping. Split on the last `:/` boundary first so local paths containing colons remain valid.
 - `--config <path>` / `-c`: Path to a YAML or JSON configuration file.
 - `--exclude <glob>` / `-x` (repeatable): Global exclude glob patterns merged into all mappings.
@@ -63,6 +65,9 @@ Because `@protontech/drive-sdk` intentionally omits login/session flows, [`src/p
 - `--encryption-key-file <path>`: Path to >= 32-byte key file encrypting `session.json` and `state.json` at rest (env: `DATA_ENCRYPTION_KEY_FILE`, YAML/JSON: `encryptionKeyFile`).
 - `--allow-plaintext-state`: Explicit opt-out allowing unencrypted `0600` JSON persistence (env: `ALLOW_PLAINTEXT_STATE`, YAML/JSON: `allowPlaintextState`).
 - `--session-file <path>`, `--state-file <path>`: Override persistent session and event cache paths.
+- `--status-file <path>`: Override unencrypted run telemetry JSON file path (default `status.json` beside `STATE_FILE`; env: `STATUS_FILE`, YAML/JSON: `statusFile`).
+- `--status-host <host>`, `--status-port <port>`, `--status-max-age-hours <hours>`: Configure `status-server` listen address (`0.0.0.0:9108`) and staleness threshold (`26` hours).
+- `--message <text>`: Failure reason recorded by `report-failure` (env: `FAILURE_MESSAGE`).
 - `--verbose` / `-v`: Enables credential-safe diagnostic logging across auth, API calls, and sync phases (env: `VERBOSE`, YAML/JSON: `verbose`).
 - `--local-dir` / `-l`, `--remote-dir` / `-r`, or positional `[LOCAL_DIR] [REMOTE_DIR]`: Legacy single-mapping compatibility (also supports `--local-dir LOCAL REMOTE`).
 - `--help` / `-h`: Prints usage text and exits `0`.
@@ -124,16 +129,28 @@ Computes a deterministic [`SyncPlan`](./src/types.ts) for every mapping before p
 
 ---
 
-## 6. Signals & Exit Codes ([`src/index.ts`](./src/index.ts))
+## 6. Run Telemetry & Read-Only Status Server ([`src/runStatus.ts`](./src/runStatus.ts), [`src/statusServer.ts`](./src/statusServer.ts))
 
-- `SIGINT` aborts active operations via `AbortController`, releases `CryptoProxy` keys, and exits `130`.
-- `SIGTERM` aborts active operations cleanly via `AbortController`, releases `CryptoProxy` keys, and exits `143`.
-- A second `SIGINT`/`SIGTERM` forces immediate termination with the same signal exit code.
-- Normal sync completion or `--help` exits `0`; invalid configuration, authentication failures, or fatal upload/IO errors log `Sync error: <message>` to `stderr` and exit `1`.
+- **Plaintext Telemetry File (`STATUS_FILE`, default `status.json` beside `STATE_FILE`)**:
+  - Updated atomically on live `sync` runs (never written during `--dry-run`) across start (`running: true` while preserving previous `status` and `lastSuccessAt`), completion (`ok` or `warning` on partial trash failures while updating `lastSuccessAt`), and failure (`error` while preserving previous `lastSuccessAt` and sanitizing/redacting tokens, URL credentials, and emails from `errorMessage`).
+  - Excludes local filesystem paths, filenames, remote mapping names, and authentication secrets so it can safely be served unauthenticated over a private LAN.
+- **External Failure Reporting (`report-failure`)**:
+  - Records external wrapper failures (such as a failed pre-sync `document_exporter` run) into `STATUS_FILE` without requiring directory mappings, encryption keys, or Proton authentication.
+- **Built-In Status HTTP Server (`status-server`)**:
+  - Serves `GET`/`HEAD` `/status` and `/status.json` (`200 OK` JSON with dynamically evaluated `overdue`, `ageHours`, `problem`, and `healthy`) and `/health` (`200` when `healthy`, `503` when `problem`). Designed to run in a dedicated companion container mounting only `/data:ro`.
 
 ---
 
-## 7. Known SDK & Operational Caveats
+## 7. Signals & Exit Codes ([`src/index.ts`](./src/index.ts))
+
+- `SIGINT` aborts active operations via `AbortController`, releases `CryptoProxy` keys, closes `status-server` if running, and exits `130`.
+- `SIGTERM` aborts active operations cleanly via `AbortController`, releases `CryptoProxy` keys, closes `status-server` if running, and exits `143`.
+- A second `SIGINT`/`SIGTERM` forces immediate termination with the same signal exit code.
+- Normal sync completion, `report-failure`, or `--help` exits `0`; invalid configuration, authentication failures, or fatal upload/IO errors log `Sync error: <message>` to `stderr` and exit `1`.
+
+---
+
+## 8. Known SDK & Operational Caveats
 
 - **Preview SDK & Crypto v2**: `@protontech/drive-sdk` (`0.23.0`) is under active Proton development; future Crypto v2 protocol upgrades may require updating SDK and crypto dependencies.
 - **Auth endpoint stability**: SRP login (`core/v4/auth*`, `users`, `addresses`, `keys/*`) talks directly to Proton Core APIs because `@protontech/drive-sdk` does not ship an auth package.

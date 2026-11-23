@@ -17,6 +17,7 @@ One-way, SHA1-verified backup synchronization from one or more local directories
 - **Zero-Bandwidth Rename & Move Detection**: Matches deleted/added local paths by SHA1 digest + node UID and executes remote `renameNode` / `moveNodes` instead of re-uploading moved or renamed files.
 - **File Version History & Streaming SHA1**: Uploads modified files via `getFileRevisionUploader` (creating clean revisions) and hashes local files via Node.js streams without buffering multi-GB files into RAM.
 - **Glob Excludes, Dry-Run & Batched Cleanup**: Supports `.gitignore`-style exclude globs (`--exclude` / `EXCLUDE_PATTERNS` / config file), `--dry-run` previews, batched `trashNodes` cleanup, and optional `--delete-empty-dirs` pruning.
+- **Built-In Telemetry & Home Assistant Integration**: Automatically records aggregate run outcomes and timestamps into `status.json` (`STATUS_FILE`), exposes an unauthenticated read-only HTTP server (`status-server` on port `9108` with `/status` and `/health`), supports `report-failure` for external pre-sync hooks, and includes reference [`examples/run-backup.sh`](./examples/run-backup.sh) and [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) templates.
 - **Hardened Container & Supply Chain**: Multi-stage digest-pinned `node:26-slim` image running as non-root `node`, supporting `read_only: true`, Docker/Podman secrets (`*_FILE`), exact-pinned npm dependencies, SHA-pinned GitHub Actions, `harden-runner` egress auditing, SLSA image provenance attestations, and multi-arch (`linux/amd64`, `linux/arm64`) publishing to GHCR (`ghcr.io`).
 
 ---
@@ -67,7 +68,7 @@ If `/data/session.json` is missing or revoked, the container can authenticate au
 
 ## Docker / Podman Compose & Systemd Timer Quickstart
 
-1. Generate `./secrets/data_encryption_key.txt` (step above) and adapt [`compose.yaml`](./compose.yaml) (configured for `ghcr.io/fklrtw/backup-to-proton-drive:latest`, source bind mounts, and `SYNC_MAPPINGS` or a mounted config file based on [`config.example.yaml`](./config.example.yaml)).
+1. Generate `./secrets/data_encryption_key.txt` (step above) and adapt [`compose.yaml`](./compose.yaml) (configured for `ghcr.io/fklrtw/backup-to-proton-drive:latest`, source bind mounts, `SYNC_MAPPINGS` or a mounted config file based on [`config.example.yaml`](./config.example.yaml), `profiles: ["backup"]` on `backup`, and the companion read-only `status` service).
 2. Perform the one-time interactive login (or configure headless secrets):
    ```bash
    docker compose run --rm -it backup login
@@ -76,16 +77,36 @@ If `/data/session.json` is missing or revoked, the container can authenticate au
    ```bash
    docker compose run --rm backup --dry-run
    ```
-4. Run a one-shot sync manually:
+4. Run a one-shot sync manually (note `--no-deps` skips starting `status` if you haven't started it yet):
    ```bash
    docker compose run --rm backup
    ```
-5. Schedule recurring one-shot runs via the sample systemd units in [`systemd/backup-to-proton-drive.service`](./systemd/backup-to-proton-drive.service) and [`systemd/backup-to-proton-drive.timer`](./systemd/backup-to-proton-drive.timer):
+5. *(Optional)* Start the persistent read-only `status` HTTP telemetry companion (`http://<host>:9108/status` and `/health`):
+   ```bash
+   docker compose up -d
+   ```
+6. Schedule recurring one-shot runs via the sample systemd units in [`systemd/backup-to-proton-drive.service`](./systemd/backup-to-proton-drive.service) and [`systemd/backup-to-proton-drive.timer`](./systemd/backup-to-proton-drive.timer) (and see [`examples/run-backup.sh`](./examples/run-backup.sh) if wrapping pre-sync hooks such as Paperless-ngx `document_exporter`):
    ```bash
    sudo cp systemd/backup-to-proton-drive.service systemd/backup-to-proton-drive.timer /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl enable --now backup-to-proton-drive.timer
    ```
+
+---
+
+## Home Assistant Monitoring & Health Endpoint
+
+Every live `sync` writes an unauthenticated, secret-free summary file (`STATUS_FILE`, defaulting to `/data/status.json`) tracking `running`, `status` (`ok`, `warning`, `error`, `never_run`), `lastRunAt`, `lastSuccessAt`, `durationSeconds`, sanitized `errorMessage`, and aggregate transfer counts (no filenames, paths, tokens, or emails).
+
+The `status` service in [`compose.yaml`](./compose.yaml) runs `backup-to-proton-drive status-server` mounting **only** `proton_backup_data:/data:ro` (no encryption key, no backup source mounts) and exposes:
+- `GET /status` / `GET /status.json`: Always returns `200 OK` JSON with dynamically computed `ageHours`, `overdue` (default threshold `26` hours), `problem` (`status !== "ok" || overdue`), and `healthy` (`!problem`) — ideal for Home Assistant's `rest:` integration.
+- `GET /health`: Returns `200 OK` when `healthy === true` and `503 Service Unavailable` when `problem === true`.
+
+See [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) for a ready-to-use Home Assistant package exposing `binary_sensor.proton_backup_needs_attention` (`device_class: problem`), persistent UI notifications, and a Maintenance dashboard card.
+
+> [!NOTE]
+> Keep port `9108` bound to your trusted LAN / firewall and do not expose it publicly without authentication. External pre-sync scripts can also record failures immediately with:
+> `docker compose run --rm --no-deps backup report-failure --message "Pre-sync step failed"`
 
 ---
 
@@ -103,6 +124,8 @@ Mappings are resolved in the following priority order:
 | Flag | Short | Description |
 | :--- | :--- | :--- |
 | `login` | — | Subcommand to interactively authenticate and store `session.json` |
+| `status-server` | — | Subcommand to serve read-only `/status` and `/health` HTTP telemetry |
+| `report-failure` | — | Subcommand to record an external failure message into `status.json` |
 | `--map <local>:<remote>` | `-m` | Add a sync mapping (repeatable) |
 | `--config <path>` | `-c` | Path to a YAML or JSON configuration file |
 | `--exclude <glob>` | `-x` | Add a global exclude glob pattern (repeatable) |
@@ -112,9 +135,14 @@ Mappings are resolved in the following priority order:
 | `--concurrency <count>` | — | Maximum concurrent file uploads (`1`-`32`, default `5`; env: `UPLOAD_CONCURRENCY`) |
 | `--small-file-upload` | — | Enable single-request SDK uploads under 128 KiB (env: `ENABLE_SMALL_FILE_UPLOAD`) |
 | `--encryption-key-file <path>` | — | Path to >= 32-byte key file encrypting `session.json` and `state.json` (env: `DATA_ENCRYPTION_KEY_FILE`) |
-|      --allow-plaintext-state   | — | Explicitly opt out of at-rest encryption and allow plaintext `0600` files (env: `ALLOW_PLAINTEXT_STATE`) |
+| `--allow-plaintext-state` | — | Explicitly opt out of at-rest encryption and allow plaintext `0600` files (env: `ALLOW_PLAINTEXT_STATE`) |
 | `--session-file <path>` | — | Override session file location (default `/data/session.json` or `./data/session.json`) |
 | `--state-file <path>` | — | Override event/cache state file location (default `/data/state.json` or `./data/state.json`) |
+| `--status-file <path>` | — | Override run telemetry status file location (default `status.json` beside `STATE_FILE`; env: `STATUS_FILE`) |
+| `--status-host <host>` | — | Host interface bound by `status-server` (default `0.0.0.0`; env: `STATUS_SERVER_HOST`) |
+| `--status-port <port>` | — | TCP port bound by `status-server` (`1`-`65535`, default `9108`; env: `STATUS_SERVER_PORT`) |
+| `--status-max-age-hours <h>` | — | Max hours since `lastSuccessAt` before `overdue: true` (default `26`; env: `STATUS_MAX_AGE_HOURS`) |
+| `--message <text>` | — | Failure description recorded by `report-failure` (env: `FAILURE_MESSAGE`) |
 | `--verbose` | `-v` | Enable detailed credential-safe diagnostic logging across auth, HTTP requests, and sync phases (env: `VERBOSE`) |
 | `--local-dir` / `--remote-dir` | `-l` / `-r` | Legacy single-mapping flags |
 | `--help` | `-h` | Display usage information |

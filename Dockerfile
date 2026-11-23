@@ -36,7 +36,11 @@ USER node
 
 ENV NODE_ENV=production \
     SESSION_FILE=/data/session.json \
-    STATE_FILE=/data/state.json
+    STATE_FILE=/data/state.json \
+    STATUS_FILE=/data/status.json
+
+# Optional built-in HTTP telemetry port used by the `status-server` subcommand
+EXPOSE 9108
 
 VOLUME ["/data"]
 

@@ -52,6 +52,11 @@ interface RawConfigurationFile {
   sessionFilePath?: unknown;
   stateFile?: unknown;
   stateFilePath?: unknown;
+  statusFile?: unknown;
+  statusFilePath?: unknown;
+  statusServerHost?: unknown;
+  statusServerPort?: unknown;
+  statusMaxAgeHours?: unknown;
   apiBaseHost?: unknown;
   mappings?: unknown;
 }
@@ -65,12 +70,16 @@ export function getUsageText(): string {
   return [
     'Usage:',
     '  backup-to-proton-drive login [options]',
+    '  backup-to-proton-drive status-server [options]',
+    '  backup-to-proton-drive report-failure --message <reason> [options]',
     '  backup-to-proton-drive [options]',
     '  backup-to-proton-drive --map <LOCAL_DIR>:<REMOTE_DIR> [--map <LOCAL_DIR2>:<REMOTE_DIR2> ...]',
     '  backup-to-proton-drive <LOCAL_DIR> <REMOTE_DIR>',
     '',
     'Commands:',
     '  login                         Interactively authenticate with Proton and persist session file',
+    '  status-server                 Run the read-only HTTP telemetry server exposing status.json',
+    '  report-failure                Record an external pre-sync failure into status.json',
     '  (default)                     Run a one-shot SHA1-verified sync across all configured mappings',
     '',
     'Options:',
@@ -86,6 +95,11 @@ export function getUsageText(): string {
     '      --allow-plaintext-state   Explicitly allow unencrypted 0600 JSON session/state files',
     '      --session-file <path>     Path to persisted session file',
     '      --state-file <path>       Path to persisted remote state and event cursor cache file',
+    '      --status-file <path>      Path to unencrypted JSON run status file (default: status.json beside state)',
+    '      --status-host <host>      Interface bound by status-server (default: 0.0.0.0)',
+    '      --status-port <port>      TCP port bound by status-server (1-65535, default: 9108)',
+    '      --status-max-age-hours <h> Max hours since lastSuccessAt before overdue (default: 26)',
+    '      --message <text>          Failure description recorded by report-failure',
     '  -v, --verbose                 Enable verbose credential-safe diagnostic logging',
     '  -l, --local-dir <path>        Legacy single-mapping local source directory',
     '  -r, --remote-dir <path>       Legacy single-mapping remote Proton Drive directory',
@@ -107,6 +121,11 @@ export function getUsageText(): string {
     '  DATA_ENCRYPTION_KEY_FILE      Secret file (>=32 bytes) encrypting session.json and state.json at rest',
     '  ALLOW_PLAINTEXT_STATE         Set true/1 to allow plaintext 0600 storage without an encryption key',
     '  SESSION_FILE / STATE_FILE     Paths for persisted session and incremental event cache',
+    '  STATUS_FILE                   Path to unencrypted JSON status file (default: status.json beside state)',
+    '  STATUS_SERVER_HOST            Interface bound by status-server (default: 0.0.0.0)',
+    '  STATUS_SERVER_PORT            TCP port bound by status-server (default: 9108)',
+    '  STATUS_MAX_AGE_HOURS          Max hours since lastSuccessAt before overdue (default: 26)',
+    '  FAILURE_MESSAGE               Fallback error message for report-failure',
     '  PROTON_USERNAME               Proton username/email for headless login (supports *_FILE)',
     '  PROTON_PASSWORD               Proton password for headless login (supports *_FILE)',
     '  PROTON_TOTP_SECRET            Optional Base32 TOTP secret for 2FA (supports *_FILE)',
@@ -178,6 +197,54 @@ function parsePositiveIntegerOption(
   if (!Number.isInteger(parsedNumber) || parsedNumber < minimumValue || parsedNumber > maximumValue) {
     throw new Error(
       `Option ${optionName} must be an integer between ${minimumValue} and ${maximumValue} (received ${parsedNumber}).`,
+    );
+  }
+
+  return parsedNumber;
+}
+
+/**
+ * Validates and parses a positive numeric option (integer or decimal) within bounds.
+ *
+ * @param rawValue - Raw string or number value from CLI, environment, or YAML/JSON config.
+ * @param optionName - Option name displayed in validation error messages.
+ * @param exclusiveMinimumValue - Strict lower bound (`value > exclusiveMinimumValue`).
+ * @param maximumValue - Inclusive upper bound (`value <= maximumValue`).
+ * @returns Validated finite number, or `undefined` when `rawValue` is `undefined`.
+ */
+function parsePositiveNumberOption(
+  rawValue: unknown,
+  optionName: string,
+  exclusiveMinimumValue: number,
+  maximumValue: number,
+): number | undefined {
+  if (rawValue === undefined || rawValue === null) {
+    return undefined;
+  }
+
+  let parsedNumber: number;
+  if (typeof rawValue === 'number') {
+    parsedNumber = rawValue;
+  } else if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+      throw new Error(`Invalid number value "${rawValue}" for ${optionName}.`);
+    }
+    parsedNumber = Number.parseFloat(trimmed);
+  } else {
+    throw new Error(`Configuration option ${optionName} must be a number.`);
+  }
+
+  if (
+    !Number.isFinite(parsedNumber) ||
+    parsedNumber <= exclusiveMinimumValue ||
+    parsedNumber > maximumValue
+  ) {
+    throw new Error(
+      `Option ${optionName} must be greater than ${exclusiveMinimumValue} and at most ${maximumValue} (received ${parsedNumber}).`,
     );
   }
 
@@ -440,6 +507,11 @@ export function parseApplicationConfiguration(
       'allow-plaintext-state': { type: 'boolean' },
       'session-file': { type: 'string' },
       'state-file': { type: 'string' },
+      'status-file': { type: 'string' },
+      'status-host': { type: 'string' },
+      'status-port': { type: 'string' },
+      'status-max-age-hours': { type: 'string' },
+      message: { type: 'string' },
       'local-dir': { type: 'string', short: 'l' },
       'remote-dir': { type: 'string', short: 'r' },
       help: { type: 'boolean', short: 'h' },
@@ -454,6 +526,10 @@ export function parseApplicationConfiguration(
       dryRun: false,
       sessionFilePath: '',
       stateFilePath: '',
+      statusFilePath: '',
+      statusServerHost: '0.0.0.0',
+      statusServerPort: 9108,
+      statusMaxAgeHours: 26,
       apiBaseHost: 'drive-api.proton.me',
       applicationVersion,
       uploadConcurrency: 5,
@@ -467,8 +543,15 @@ export function parseApplicationConfiguration(
     };
   }
 
-  const isLoginCommand = positionals[0] === 'login';
-  const command: ApplicationConfiguration['command'] = isLoginCommand ? 'login' : 'sync';
+  const rawSubcommand = positionals[0];
+  let command: ApplicationConfiguration['command'] = 'sync';
+  if (rawSubcommand === 'login') {
+    command = 'login';
+  } else if (rawSubcommand === 'status-server') {
+    command = 'status-server';
+  } else if (rawSubcommand === 'report-failure') {
+    command = 'report-failure';
+  }
 
   const configFilePath = values.config ?? environmentVariables.CONFIG_FILE;
   let parsedConfigFile: RawConfigurationFile = {};
@@ -516,6 +599,92 @@ export function parseApplicationConfiguration(
       configStateFile ??
       path.join(defaultDataDirectory, 'state.json'),
   );
+
+  if (
+    parsedConfigFile.statusFile !== undefined &&
+    typeof parsedConfigFile.statusFile !== 'string'
+  ) {
+    throw new Error('Configuration field "statusFile" must be a string path.');
+  }
+  const configStatusFile =
+    typeof parsedConfigFile.statusFile === 'string'
+      ? parsedConfigFile.statusFile
+      : typeof parsedConfigFile.statusFilePath === 'string'
+        ? parsedConfigFile.statusFilePath
+        : undefined;
+  const statusFilePath = path.resolve(
+    values['status-file'] ??
+      environmentVariables.STATUS_FILE ??
+      configStatusFile ??
+      path.join(path.dirname(stateFilePath), 'status.json'),
+  );
+
+  if (
+    parsedConfigFile.statusServerHost !== undefined &&
+    typeof parsedConfigFile.statusServerHost !== 'string'
+  ) {
+    throw new Error('Configuration field "statusServerHost" must be a string.');
+  }
+  const rawStatusServerHost =
+    values['status-host'] ??
+    environmentVariables.STATUS_SERVER_HOST ??
+    (typeof parsedConfigFile.statusServerHost === 'string'
+      ? parsedConfigFile.statusServerHost
+      : undefined) ??
+    '0.0.0.0';
+  const statusServerHost = rawStatusServerHost.trim();
+  if (statusServerHost.length === 0) {
+    throw new Error('Status server host cannot be empty.');
+  }
+
+  const statusServerPort =
+    parsePositiveIntegerOption(values['status-port'], '--status-port', 1, 65535) ??
+    parsePositiveIntegerOption(
+      environmentVariables.STATUS_SERVER_PORT,
+      'STATUS_SERVER_PORT',
+      1,
+      65535,
+    ) ??
+    parsePositiveIntegerOption(
+      parsedConfigFile.statusServerPort,
+      'config.statusServerPort',
+      1,
+      65535,
+    ) ??
+    9108;
+
+  const statusMaxAgeHours =
+    parsePositiveNumberOption(values['status-max-age-hours'], '--status-max-age-hours', 0, 8760) ??
+    parsePositiveNumberOption(
+      environmentVariables.STATUS_MAX_AGE_HOURS,
+      'STATUS_MAX_AGE_HOURS',
+      0,
+      8760,
+    ) ??
+    parsePositiveNumberOption(
+      parsedConfigFile.statusMaxAgeHours,
+      'config.statusMaxAgeHours',
+      0,
+      8760,
+    ) ??
+    26;
+
+  let failureMessage: string | undefined;
+  if (command === 'report-failure') {
+    const positionalFailureMessage = positionals.slice(1).join(' ').trim();
+    const resolvedFailureMessage = (
+      values.message ??
+      (positionalFailureMessage.length > 0 ? positionalFailureMessage : undefined) ??
+      environmentVariables.FAILURE_MESSAGE ??
+      ''
+    ).trim();
+    if (resolvedFailureMessage.length === 0) {
+      throw new Error(
+        'Missing failure message for report-failure. Pass --message "<reason>", positional text, or set FAILURE_MESSAGE.',
+      );
+    }
+    failureMessage = resolvedFailureMessage;
+  }
 
   const apiBaseHostRaw =
     environmentVariables.PROTON_API_HOST ??
@@ -741,13 +910,19 @@ export function parseApplicationConfiguration(
     configAllowPlaintextState ??
     false;
 
+  const requiresEncryptedSessionOrState = command === 'login' || command === 'sync';
+
   const encryptionKeyFilePath =
     values['encryption-key-file'] ??
     environmentVariables.DATA_ENCRYPTION_KEY_FILE ??
     configEncryptionKeyFile;
 
   let dataEncryptionKey: Buffer | undefined;
-  if (encryptionKeyFilePath !== undefined && encryptionKeyFilePath.trim().length > 0) {
+  if (
+    requiresEncryptedSessionOrState &&
+    encryptionKeyFilePath !== undefined &&
+    encryptionKeyFilePath.trim().length > 0
+  ) {
     const resolvedEncryptionKeyPath = path.resolve(encryptionKeyFilePath.trim());
     if (!fs.existsSync(resolvedEncryptionKeyPath)) {
       throw new Error(`Encryption key file does not exist: ${resolvedEncryptionKeyPath}`);
@@ -759,7 +934,7 @@ export function parseApplicationConfiguration(
     );
   }
 
-  if (!dataEncryptionKey && !allowPlaintextState) {
+  if (requiresEncryptedSessionOrState && !dataEncryptionKey && !allowPlaintextState) {
     throw new Error(
       'At-rest encryption key is required for session.json and state.json. Mount a key file (>= 32 bytes, e.g. generated with "openssl rand -base64 32") and set DATA_ENCRYPTION_KEY_FILE (or --encryption-key-file), or explicitly opt out with ALLOW_PLAINTEXT_STATE=true (--allow-plaintext-state).',
     );
@@ -778,6 +953,11 @@ export function parseApplicationConfiguration(
     dryRun,
     sessionFilePath,
     stateFilePath,
+    statusFilePath,
+    statusServerHost,
+    statusServerPort,
+    statusMaxAgeHours,
+    failureMessage,
     apiBaseHost,
     applicationVersion,
     uploadConcurrency,

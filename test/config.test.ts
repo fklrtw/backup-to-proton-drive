@@ -468,4 +468,136 @@ describe('configuration parsing', () => {
       /Configuration field "verbose" must be a boolean/,
     );
   });
+
+  it('parses status file, status-server, and report-failure configuration across CLI, env, and YAML', () => {
+    const defaultStatusConfig = parseApplicationConfiguration({
+      argv: ['--map', `${localDirectoryOne}:/StatusDefault`, '--allow-plaintext-state'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(defaultStatusConfig.statusFilePath, path.join(dataDirectory, 'status.json'));
+    assert.equal(defaultStatusConfig.statusServerHost, '0.0.0.0');
+    assert.equal(defaultStatusConfig.statusServerPort, 9108);
+    assert.equal(defaultStatusConfig.statusMaxAgeHours, 26);
+
+    const customStateDirectory = path.join(temporaryRoot, 'custom-state-dir');
+    const derivedStatusConfig = parseApplicationConfiguration({
+      argv: [
+        '--map',
+        `${localDirectoryOne}:/StatusDerived`,
+        '--state-file',
+        path.join(customStateDirectory, 'remote-state.json'),
+        '--allow-plaintext-state',
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(derivedStatusConfig.statusFilePath, path.join(customStateDirectory, 'status.json'));
+
+    const statusServerCliConfig = parseApplicationConfiguration({
+      argv: [
+        'status-server',
+        '--status-file',
+        path.join(temporaryRoot, 'cli-status.json'),
+        '--status-host',
+        '127.0.0.1',
+        '--status-port',
+        '9200',
+        '--status-max-age-hours',
+        '12.5',
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(statusServerCliConfig.command, 'status-server');
+    assert.equal(statusServerCliConfig.mappings.length, 0);
+    assert.equal(statusServerCliConfig.statusFilePath, path.join(temporaryRoot, 'cli-status.json'));
+    assert.equal(statusServerCliConfig.statusServerHost, '127.0.0.1');
+    assert.equal(statusServerCliConfig.statusServerPort, 9200);
+    assert.equal(statusServerCliConfig.statusMaxAgeHours, 12.5);
+
+    const statusServerEnvConfig = parseApplicationConfiguration({
+      argv: ['status-server'],
+      environmentVariables: {
+        STATUS_FILE: path.join(temporaryRoot, 'env-status.json'),
+        STATUS_SERVER_HOST: '192.168.1.10',
+        STATUS_SERVER_PORT: '9300',
+        STATUS_MAX_AGE_HOURS: '30',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(statusServerEnvConfig.statusFilePath, path.join(temporaryRoot, 'env-status.json'));
+    assert.equal(statusServerEnvConfig.statusServerHost, '192.168.1.10');
+    assert.equal(statusServerEnvConfig.statusServerPort, 9300);
+    assert.equal(statusServerEnvConfig.statusMaxAgeHours, 30);
+
+    const yamlStatusPath = path.join(temporaryRoot, 'status-config.yaml');
+    fs.writeFileSync(
+      yamlStatusPath,
+      [
+        'statusFile: ' + path.join(temporaryRoot, 'yaml-status.json'),
+        'statusServerHost: "10.0.0.5"',
+        'statusServerPort: 9400',
+        'statusMaxAgeHours: 48',
+        'allowPlaintextState: true',
+        'mappings:',
+        `  - "${localDirectoryOne}:/StatusYaml"`,
+      ].join('\n'),
+      'utf8',
+    );
+    const yamlStatusConfig = parseApplicationConfiguration({
+      argv: ['status-server', '--config', yamlStatusPath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(yamlStatusConfig.statusFilePath, path.join(temporaryRoot, 'yaml-status.json'));
+    assert.equal(yamlStatusConfig.statusServerHost, '10.0.0.5');
+    assert.equal(yamlStatusConfig.statusServerPort, 9400);
+    assert.equal(yamlStatusConfig.statusMaxAgeHours, 48);
+
+    const reportFailureFlagConfig = parseApplicationConfiguration({
+      argv: ['report-failure', '--message', 'Paperless document_exporter exited 1'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(reportFailureFlagConfig.command, 'report-failure');
+    assert.equal(reportFailureFlagConfig.failureMessage, 'Paperless document_exporter exited 1');
+
+    const reportFailurePositionalConfig = parseApplicationConfiguration({
+      argv: ['report-failure', 'External', 'pre-sync', 'failed'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(reportFailurePositionalConfig.failureMessage, 'External pre-sync failed');
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['report-failure'],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Missing failure message/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['status-server', '--status-port', '70000'],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /between 1 and 65535/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['status-server', '--status-max-age-hours', '0'],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /greater than 0/,
+    );
+  });
 });

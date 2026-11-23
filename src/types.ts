@@ -40,7 +40,7 @@ export interface HeadlessCredentials {
  */
 export interface ApplicationConfiguration {
   /** Subcommand or mode requested by the caller. */
-  command: 'sync' | 'login' | 'help';
+  command: 'sync' | 'login' | 'help' | 'status-server' | 'report-failure';
   /** Ordered list of local-to-remote directory synchronization mappings. */
   mappings: DirectoryMapping[];
   /** When true, computes and prints planned actions without mutating Proton Drive or cached state. */
@@ -49,6 +49,16 @@ export interface ApplicationConfiguration {
   sessionFilePath: string;
   /** Path to the persisted remote tree snapshot and event cursor cache file. */
   stateFilePath: string;
+  /** Path to the unencrypted JSON status summary file polled by `status-server`. */
+  statusFilePath: string;
+  /** Host interface bound by the `status-server` HTTP listener (defaults to `0.0.0.0`). */
+  statusServerHost: string;
+  /** TCP port bound by the `status-server` HTTP listener (defaults to `9108`). */
+  statusServerPort: number;
+  /** Maximum hours permitted since `lastSuccessAt` before `status-server` marks the backup overdue (defaults to `26`). */
+  statusMaxAgeHours: number;
+  /** Error message recorded when invoking the `report-failure` subcommand. */
+  failureMessage?: string | undefined;
   /** Proton API host name without URL scheme (defaults to `drive-api.proton.me`). */
   apiBaseHost: string;
   /** Application semantic version used for the required `x-pm-appversion` header. */
@@ -380,4 +390,70 @@ export interface ProtonDriveAdapter {
     nodeUids: string[],
     abortSignal?: AbortSignal,
   ): Promise<Array<{ nodeUid: string; succeeded: boolean; errorMessage?: string | undefined }>>;
+}
+
+/**
+ * Health states persisted to `status.json` across one-shot backup runs.
+ */
+export type RunStatusState = 'ok' | 'warning' | 'error' | 'never_run';
+
+/**
+ * Aggregate transfer and reconciliation counts persisted inside `status.json` without
+ * exposing any local filesystem paths, filenames, remote mapping names, or credentials.
+ */
+export interface PersistedRunStatusSummary {
+  mappingsCount: number;
+  usedIncrementalEvents: boolean;
+  eventsProcessedCount: number;
+  totalNewFilesCount: number;
+  totalUpdatedFilesCount: number;
+  totalMovedOrRenamedFilesCount: number;
+  totalUnchangedFilesCount: number;
+  totalTrashedFilesCount: number;
+  totalTrashedEmptyFoldersCount: number;
+  totalFailedTrashCount: number;
+  totalBytesTransferred: number;
+  totalBytesSavedByMoves: number;
+}
+
+/**
+ * Unauthenticated run telemetry payload atomically persisted to `status.json` (`STATUS_FILE`).
+ */
+export interface PersistedRunStatus {
+  /** Schema version identifier for forward compatibility. */
+  schemaVersion: 1;
+  /** Outcome of the most recent recorded run (`never_run` before the first live sync). */
+  status: RunStatusState;
+  /** True while a live sync invocation is currently executing. */
+  running: boolean;
+  /** ISO-8601 timestamp when the active run started, or `null` when idle. */
+  currentRunStartedAt: string | null;
+  /** ISO-8601 timestamp when the last completed, failed, or externally reported run finished. */
+  lastRunAt: string | null;
+  /** ISO-8601 timestamp of the latest run where all local uploads/moves succeeded. */
+  lastSuccessAt: string | null;
+  /** Elapsed duration in seconds for the latest recorded run, or `null`. */
+  durationSeconds: number | null;
+  /** Sanitized, truncated single-line error description for warnings/errors, or `null`. */
+  errorMessage: string | null;
+  /** Aggregate file and byte counts from the latest completed run, or `null` on failure. */
+  summary: PersistedRunStatusSummary | null;
+}
+
+/**
+ * Live evaluated status response returned by `status-server` (`GET /status` and `GET /health`).
+ */
+export interface EvaluatedRunStatus extends PersistedRunStatus {
+  /** ISO-8601 timestamp when `status-server` evaluated the status file. */
+  checkedAt: string;
+  /** Configured staleness threshold in hours (`STATUS_MAX_AGE_HOURS`, default `26`). */
+  maxAgeHours: number;
+  /** Elapsed hours since `lastSuccessAt`, or `null` when no successful backup has completed. */
+  ageHours: number | null;
+  /** True when `lastSuccessAt` is missing or older than `maxAgeHours`. */
+  overdue: boolean;
+  /** True when any operator attention is needed (`status !== 'ok' || overdue`). */
+  problem: boolean;
+  /** Convenience inverse of `problem` (`!problem`). */
+  healthy: boolean;
 }
