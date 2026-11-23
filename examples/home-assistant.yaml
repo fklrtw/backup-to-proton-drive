@@ -8,22 +8,29 @@
 #        packages:
 #          proton_backup: !include packages/proton_backup.yaml
 #    (or merge the top-level `rest:`, `template:`, and `automation:` blocks directly).
-# 4. Restart Home Assistant.
+# 4. Restart Home Assistant completely (adding a new `rest:` integration requires a full restart;
+#    YAML reloads alone will not register new REST sensors).
+#
+# Naming note:
+# - Home Assistant derives default entity IDs from `name:` (not `unique_id:`). If you rename the
+#   sensors below (for example adding a `Paperless ` prefix), update `sensor.proton_backup_status`
+#   and `binary_sensor.proton_backup_needs_attention` throughout this file to match.
 
 rest:
   - resource: http://192.168.1.50:9108/status
     scan_interval: 300
     timeout: 15
-    binary_sensor:
-      # Exposed natively with `device_class: problem` (`on` = Problem, `off` = Clear).
+    sensor:
+      # Home Assistant supports `json_attributes:` on `rest:` `sensor:` entities (not `binary_sensor:`).
+      # Exposes `status` (`ok` / `warning` / `error` / `never_run`) plus compact summary attributes.
       # Note: `ageHours` and `checkedAt` are intentionally omitted from json_attributes because
       # they change on every poll and would unnecessarily inflate the Home Assistant recorder database.
-      - name: "Proton Backup Problem"
-        unique_id: proton_backup_problem
-        device_class: problem
-        value_template: "{{ value_json.problem }}"
+      - name: "Proton Backup Status"
+        unique_id: proton_backup_status
+        value_template: "{{ value_json.status }}"
         json_attributes:
-          - status
+          - problem
+          - healthy
           - overdue
           - running
           - lastRunAt
@@ -31,22 +38,26 @@ rest:
           - durationSeconds
           - errorMessage
           - summary
-    sensor:
+
       # Timestamp sensor showing when the last backup with complete local uploads finished.
       - name: "Proton Backup Last Success"
         unique_id: proton_backup_last_success
         device_class: timestamp
-        value_template: "{{ value_json.lastSuccessAt }}"
+        value_template: "{{ value_json.lastSuccessAt if value_json.lastSuccessAt else None }}"
 
 template:
   - binary_sensor:
-      # Wraps `binary_sensor.proton_backup_problem` so losing LAN reachability to status-server
-      # (`unavailable` or `unknown`) ALSO raises `on` ("Problem") in your Maintenance dashboard.
+      # Exposes a single `device_class: problem` indicator (`on` = Problem, `off` = Clear).
+      # Trips on errors, partial trash warnings, overdue backups (`problem: true`), OR if the
+      # status endpoint becomes unreachable (`unavailable` / `unknown`).
       - name: "Proton Backup Needs Attention"
         unique_id: proton_backup_needs_attention
         device_class: problem
         state: >
-          {{ not is_state('binary_sensor.proton_backup_problem', 'off') }}
+          {{
+            not is_state('sensor.proton_backup_status', 'ok')
+            or state_attr('sensor.proton_backup_status', 'problem') == true
+          }}
 
 automation:
   - id: proton_backup_problem_notify
@@ -65,24 +76,39 @@ automation:
           notification_id: proton_backup_problem
           title: "Proton Drive Backup Needs Attention"
           message: >
-            {% set backup_state = state_attr('binary_sensor.proton_backup_problem', 'status') %}
-            {% set is_overdue = state_attr('binary_sensor.proton_backup_problem', 'overdue') %}
-            {% set last_success = state_attr('binary_sensor.proton_backup_problem', 'lastSuccessAt') %}
-            {% set error_detail = state_attr('binary_sensor.proton_backup_problem', 'errorMessage') %}
-            {% if states('binary_sensor.proton_backup_problem') in ['unavailable', 'unknown'] %}
-            Backup status endpoint is unreachable (`{{ states('binary_sensor.proton_backup_problem') }}`).
+            {% set backup_state = states('sensor.proton_backup_status') %}
+            {% set is_overdue = state_attr('sensor.proton_backup_status', 'overdue') %}
+            {% set last_success = state_attr('sensor.proton_backup_status', 'lastSuccessAt') %}
+            {% set error_detail = state_attr('sensor.proton_backup_status', 'errorMessage') %}
+            {% if backup_state in ['unavailable', 'unknown'] %}
+            Backup status endpoint is unreachable (`{{ backup_state }}`).
             {% else %}
             Status: `{{ backup_state }}` | Overdue: `{{ is_overdue }}`
             Last success: {{ last_success or 'never' }}
             {% if error_detail %}Error: {{ error_detail }}{% endif %}
             {% endif %}
+      # Optional (requires Spook custom integration): create a native Home Assistant Repairs issue
+      # under Settings -> System -> Repairs (persists across restarts until dismissed below):
+      # - action: repairs.create
+      #   data:
+      #     domain: spook
+      #     issue_id: proton_backup_problem
+      #     title: "Proton Drive Backup Needs Attention"
+      #     description: >
+      #       Status: {{ states('sensor.proton_backup_status') }}
+      #       (overdue={{ state_attr('sensor.proton_backup_status', 'overdue') }},
+      #       lastSuccessAt={{ state_attr('sensor.proton_backup_status', 'lastSuccessAt') or 'never' }})
+      #       {{ state_attr('sensor.proton_backup_status', 'errorMessage') or '' }}
+      #     severity: error
+      #     persistent: true
+      #
       # Optional: also push a mobile notification via the Home Assistant Companion App:
       # - action: notify.mobile_app_your_phone
       #   data:
       #     title: "Proton Drive Backup Needs Attention"
       #     message: >
-      #       Status: {{ state_attr('binary_sensor.proton_backup_problem', 'status') or 'unreachable' }}
-      #       {{ state_attr('binary_sensor.proton_backup_problem', 'errorMessage') or '' }}
+      #       Status: {{ states('sensor.proton_backup_status') }}
+      #       {{ state_attr('sensor.proton_backup_status', 'errorMessage') or '' }}
 
   - id: proton_backup_problem_dismiss
     alias: "Proton Backup: Dismiss notification when healthy"
@@ -95,6 +121,11 @@ automation:
       - action: persistent_notification.dismiss
         data:
           notification_id: proton_backup_problem
+      # Optional (if using Spook `repairs.create` above): auto-remove the Repairs issue when healthy:
+      # - action: repairs.remove
+      #   data:
+      #     domain: spook
+      #     issue_id: proton_backup_problem
 
 # Optional Lovelace Maintenance Dashboard Card (hidden automatically when healthy):
 #
@@ -109,5 +140,7 @@ automation:
 #   entities:
 #     - entity: binary_sensor.proton_backup_needs_attention
 #       name: "Proton Drive Backup"
+#     - entity: sensor.proton_backup_status
+#       name: "Backup Status"
 #     - entity: sensor.proton_backup_last_success
 #       name: "Last Successful Backup"
