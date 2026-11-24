@@ -2,6 +2,9 @@
 Description=One-shot backup sync to Proton Drive via Compose
 After=network-online.target docker.service
 Wants=network-online.target
+# Circuit breaker preventing runaway loops if paired with `backup-to-proton-drive-trigger.path`:
+StartLimitIntervalSec=60
+StartLimitBurst=3
 # Uncomment when using Docker Engine; leave commented for rootless Podman:
 # Requires=docker.service
 
@@ -26,6 +29,10 @@ WorkingDirectory=/opt/backup-to-proton-drive
 # For pre-sync hooks with automatic failure telemetry (e.g. Paperless document_exporter), use examples/run-backup.sh instead.
 # For Podman, replace docker with /usr/bin/podman.
 ExecStart=/usr/bin/docker compose run --rm backup
+# Clean up any on-demand trigger file created by `status-server` (`POST /trigger`) once the run exits
+# (whether it succeeded or failed). Safe no-op for timer-initiated runs; prevents `.path` re-trigger loops
+# and keeps duplicate triggers blocked while pre-sync hooks execute before `status.json` flips to `running: true`.
+ExecStopPost=-/usr/bin/rm -f /opt/backup-to-proton-drive/trigger/backup.trigger
 TimeoutStartSec=2h
 StandardOutput=journal
 StandardError=journal

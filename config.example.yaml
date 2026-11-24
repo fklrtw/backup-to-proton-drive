@@ -27,6 +27,11 @@ statusFile: /data/status.json
 # statusServerHost: 0.0.0.0
 # statusServerPort: 9108
 # statusMaxAgeHours: 26
+# Optional on-demand trigger endpoint (`POST /trigger`) on `status-server`:
+# statusTriggerFile: /trigger/backup.trigger
+# statusTriggerTokenFile: /run/secrets/status_trigger_token
+# statusTriggerCooldownSeconds: 900
+# allowUnauthenticatedTrigger: false
 encryptionKeyFile: /run/secrets/data_encryption_key
 allowPlaintextState: false
 

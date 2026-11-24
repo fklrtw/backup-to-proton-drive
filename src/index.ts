@@ -1,6 +1,10 @@
 import { getUsageText, parseApplicationConfiguration } from './config.ts';
 import { formatProtonAppVersionHeader } from './format.ts';
 import {
+  renderHomeAssistantPackage,
+  writeHomeAssistantPackageFile,
+} from './homeAssistantConfig.ts';
+import {
   ensureAuthenticatedSession,
   releaseProtonCrypto,
   runInteractiveLogin,
@@ -44,6 +48,13 @@ function tryUpdateStatusFile(updateOperation: () => void, operationDescription: 
  */
 function logVerboseStartupSummary(configuration: ReturnType<typeof parseApplicationConfiguration>): void {
   if (configuration.command === 'status-server') {
+    const triggerEnabled = configuration.statusTriggerFilePath !== undefined;
+    const triggerAuthenticationLabel = !triggerEnabled
+      ? 'disabled'
+      : configuration.statusTriggerToken
+        ? 'Bearer token loaded from file'
+        : 'unauthenticated opt-out (--allow-unauthenticated-trigger)';
+
     console.log('[verbose] Runtime configuration:');
     console.table({
       Command: configuration.command,
@@ -52,6 +63,10 @@ function logVerboseStartupSummary(configuration: ReturnType<typeof parseApplicat
       'Status Host': configuration.statusServerHost,
       'Status Port': configuration.statusServerPort,
       'Max Age Hours': configuration.statusMaxAgeHours,
+      'Trigger Endpoint': triggerEnabled ? 'enabled (POST /trigger)' : 'disabled',
+      'Trigger File': configuration.statusTriggerFilePath ?? '(disabled)',
+      'Trigger Auth': triggerAuthenticationLabel,
+      'Trigger Cooldown Seconds': configuration.statusTriggerCooldownSeconds,
     });
     return;
   }
@@ -126,8 +141,9 @@ function waitForAbortSignal(abortSignal: AbortSignal): Promise<void> {
 }
 
 /**
- * Main CLI application entrypoint supporting `help`, interactive `login`, read-only HTTP
- * `status-server`, external `report-failure`, and one-shot multi-mapping Proton Drive sync.
+ * Main CLI application entrypoint supporting `help`, interactive `login`, HTTP
+ * `status-server`, external `report-failure`, `home-assistant-config` package generation,
+ * and one-shot multi-mapping Proton Drive sync.
  */
 async function main(): Promise<void> {
   const configuration = parseApplicationConfiguration({
@@ -136,6 +152,18 @@ async function main(): Promise<void> {
 
   if (configuration.command === 'help') {
     console.log(getUsageText());
+    return;
+  }
+
+  if (configuration.command === 'home-assistant-config') {
+    const renderedPackageYaml = renderHomeAssistantPackage(configuration.homeAssistantConfig);
+    const outputFilePath = configuration.homeAssistantConfig?.outputFilePath;
+    if (outputFilePath !== undefined) {
+      writeHomeAssistantPackageFile(outputFilePath, renderedPackageYaml);
+      console.log(`Wrote Home Assistant package configuration to ${outputFilePath}`);
+    } else {
+      process.stdout.write(renderedPackageYaml);
+    }
     return;
   }
 
@@ -182,6 +210,9 @@ async function main(): Promise<void> {
       host: configuration.statusServerHost,
       port: configuration.statusServerPort,
       maxAgeHours: configuration.statusMaxAgeHours,
+      triggerFilePath: configuration.statusTriggerFilePath,
+      triggerToken: configuration.statusTriggerToken,
+      triggerCooldownSeconds: configuration.statusTriggerCooldownSeconds,
       log: (message) => {
         console.log(message);
       },

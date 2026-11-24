@@ -479,6 +479,10 @@ describe('configuration parsing', () => {
     assert.equal(defaultStatusConfig.statusServerHost, '0.0.0.0');
     assert.equal(defaultStatusConfig.statusServerPort, 9108);
     assert.equal(defaultStatusConfig.statusMaxAgeHours, 26);
+    assert.equal(defaultStatusConfig.statusTriggerFilePath, undefined);
+    assert.equal(defaultStatusConfig.statusTriggerToken, undefined);
+    assert.equal(defaultStatusConfig.allowUnauthenticatedTrigger, false);
+    assert.equal(defaultStatusConfig.statusTriggerCooldownSeconds, 900);
 
     const customStateDirectory = path.join(temporaryRoot, 'custom-state-dir');
     const derivedStatusConfig = parseApplicationConfiguration({
@@ -598,6 +602,369 @@ describe('configuration parsing', () => {
           defaultDataDirectory: dataDirectory,
         }),
       /greater than 0/,
+    );
+  });
+
+  it('parses and validates status-server trigger file, bearer token file, opt-out, and cooldown options', () => {
+    const triggerFilePath = path.join(temporaryRoot, 'trigger', 'backup.trigger');
+    const triggerTokenFilePath = path.join(temporaryRoot, 'status-trigger.token');
+    fs.writeFileSync(triggerTokenFilePath, 'unit-test-trigger-bearer-token-at-least-32-bytes\n', 'utf8');
+
+    // CLI precedence over environment variables and YAML.
+    const cliTriggerTokenFilePath = path.join(temporaryRoot, 'cli-trigger.token');
+    fs.writeFileSync(cliTriggerTokenFilePath, 'cli-override-trigger-bearer-token-at-least-32-bytes\n', 'utf8');
+    const yamlTriggerConfigPath = path.join(temporaryRoot, 'trigger-config.yaml');
+    fs.writeFileSync(
+      yamlTriggerConfigPath,
+      [
+        `statusTriggerFile: "${path.join(temporaryRoot, 'yaml.trigger')}"`,
+        `statusTriggerTokenFile: "${triggerTokenFilePath}"`,
+        'statusTriggerCooldownSeconds: 300',
+        'allowUnauthenticatedTrigger: false',
+        'allowPlaintextState: true',
+        'mappings:',
+        `  - "${localDirectoryOne}:/TriggerYaml"`,
+      ].join('\n'),
+      'utf8',
+    );
+
+    const cliTriggerConfiguration = parseApplicationConfiguration({
+      argv: [
+        'status-server',
+        '--config',
+        yamlTriggerConfigPath,
+        '--trigger-file',
+        triggerFilePath,
+        '--trigger-token-file',
+        cliTriggerTokenFilePath,
+        '--trigger-cooldown-seconds',
+        '0',
+      ],
+      environmentVariables: {
+        STATUS_TRIGGER_FILE: path.join(temporaryRoot, 'env.trigger'),
+        STATUS_TRIGGER_TOKEN_FILE: triggerTokenFilePath,
+        STATUS_TRIGGER_COOLDOWN_SECONDS: '120',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(cliTriggerConfiguration.statusTriggerFilePath, triggerFilePath);
+    assert.equal(
+      cliTriggerConfiguration.statusTriggerToken?.toString('utf8'),
+      'cli-override-trigger-bearer-token-at-least-32-bytes',
+    );
+    assert.equal(cliTriggerConfiguration.statusTriggerCooldownSeconds, 0);
+    assert.equal(cliTriggerConfiguration.allowUnauthenticatedTrigger, false);
+
+    // Environment variable precedence over YAML.
+    const environmentTriggerConfiguration = parseApplicationConfiguration({
+      argv: ['status-server', '--config', yamlTriggerConfigPath],
+      environmentVariables: {
+        STATUS_TRIGGER_FILE: path.join(temporaryRoot, 'env.trigger'),
+        STATUS_TRIGGER_TOKEN_FILE: triggerTokenFilePath,
+        STATUS_TRIGGER_COOLDOWN_SECONDS: '180',
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(
+      environmentTriggerConfiguration.statusTriggerFilePath,
+      path.join(temporaryRoot, 'env.trigger'),
+    );
+    assert.equal(
+      environmentTriggerConfiguration.statusTriggerToken?.toString('utf8'),
+      'unit-test-trigger-bearer-token-at-least-32-bytes',
+    );
+    assert.equal(environmentTriggerConfiguration.statusTriggerCooldownSeconds, 180);
+
+    // YAML configuration values apply when CLI and environment omit overrides.
+    const yamlTriggerConfiguration = parseApplicationConfiguration({
+      argv: ['status-server', '--config', yamlTriggerConfigPath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(
+      yamlTriggerConfiguration.statusTriggerFilePath,
+      path.join(temporaryRoot, 'yaml.trigger'),
+    );
+    assert.equal(yamlTriggerConfiguration.statusTriggerCooldownSeconds, 300);
+
+    // Unauthenticated opt-out works when explicitly requested.
+    const unauthenticatedTriggerConfiguration = parseApplicationConfiguration({
+      argv: [
+        'status-server',
+        '--trigger-file',
+        triggerFilePath,
+        '--allow-unauthenticated-trigger',
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(unauthenticatedTriggerConfiguration.allowUnauthenticatedTrigger, true);
+    assert.equal(unauthenticatedTriggerConfiguration.statusTriggerToken, undefined);
+
+    // Shared YAML referencing a non-existent trigger token file still works for sync, login, and report-failure.
+    const sharedYamlConfigPath = path.join(temporaryRoot, 'shared-trigger-config.yaml');
+    fs.writeFileSync(
+      sharedYamlConfigPath,
+      [
+        `statusTriggerFile: "${triggerFilePath}"`,
+        `statusTriggerTokenFile: "${path.join(temporaryRoot, 'not-mounted-in-sync-container.token')}"`,
+        'allowPlaintextState: true',
+        'mappings:',
+        `  - "${localDirectoryOne}:/SharedTrigger"`,
+      ].join('\n'),
+      'utf8',
+    );
+    const syncWithSharedYaml = parseApplicationConfiguration({
+      argv: ['--config', sharedYamlConfigPath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(syncWithSharedYaml.command, 'sync');
+    assert.equal(syncWithSharedYaml.statusTriggerToken, undefined);
+
+    const loginWithSharedYaml = parseApplicationConfiguration({
+      argv: ['login', '--config', sharedYamlConfigPath],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(loginWithSharedYaml.command, 'login');
+
+    const reportFailureWithSharedYaml = parseApplicationConfiguration({
+      argv: ['report-failure', '--config', sharedYamlConfigPath, '--message', 'Pre-sync failed'],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+    assert.equal(reportFailureWithSharedYaml.command, 'report-failure');
+
+    // Fail-fast when status-server configures --trigger-file without token or opt-out.
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['status-server', '--trigger-file', triggerFilePath],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Trigger bearer token is required/,
+    );
+
+    // Reject raw STATUS_TRIGGER_TOKEN environment variable.
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['status-server', '--trigger-file', triggerFilePath],
+          environmentVariables: {
+            STATUS_TRIGGER_TOKEN: 'raw-env-token-should-be-blocked-for-container-inspect-safety',
+          },
+          defaultDataDirectory: dataDirectory,
+        }),
+      /STATUS_TRIGGER_TOKEN environment variable is not supported/,
+    );
+
+    // Reject missing, short, and whitespace-containing token files.
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            'status-server',
+            '--trigger-file',
+            triggerFilePath,
+            '--trigger-token-file',
+            path.join(temporaryRoot, 'missing.token'),
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /Trigger token file does not exist/,
+    );
+
+    const shortTriggerTokenPath = path.join(temporaryRoot, 'short.token');
+    fs.writeFileSync(shortTriggerTokenPath, 'too-short\n', 'utf8');
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            'status-server',
+            '--trigger-file',
+            triggerFilePath,
+            '--trigger-token-file',
+            shortTriggerTokenPath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /too short/,
+    );
+
+    const whitespaceTriggerTokenPath = path.join(temporaryRoot, 'whitespace.token');
+    fs.writeFileSync(
+      whitespaceTriggerTokenPath,
+      'token with spaces cannot be used cleanly in bearer auth header\n',
+      'utf8',
+    );
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: [
+            'status-server',
+            '--trigger-file',
+            triggerFilePath,
+            '--trigger-token-file',
+            whitespaceTriggerTokenPath,
+          ],
+          environmentVariables: {},
+          defaultDataDirectory: dataDirectory,
+        }),
+      /single-line secret without embedded spaces/,
+    );
+
+    // Reject collisions with statusFile, sessionFile, and stateFile.
+    const statusPath = path.join(dataDirectory, 'status.json');
+    const sessionPath = path.join(dataDirectory, 'session.json');
+    const statePath = path.join(dataDirectory, 'state.json');
+    for (const collidingPath of [statusPath, sessionPath, statePath]) {
+      assert.throws(
+        () =>
+          parseApplicationConfiguration({
+            argv: [
+              'status-server',
+              '--trigger-file',
+              collidingPath,
+              '--allow-unauthenticated-trigger',
+            ],
+            environmentVariables: {},
+            defaultDataDirectory: dataDirectory,
+          }),
+        /must be distinct from statusFile, sessionFile, and stateFile/,
+      );
+    }
+
+    // Reject out-of-range or non-integer cooldown values.
+    for (const invalidCooldownFlag of [
+      '--trigger-cooldown-seconds=-1',
+      '--trigger-cooldown-seconds=604801',
+      '--trigger-cooldown-seconds=abc',
+    ]) {
+      assert.throws(
+        () =>
+          parseApplicationConfiguration({
+            argv: ['status-server', invalidCooldownFlag],
+            environmentVariables: {},
+            defaultDataDirectory: dataDirectory,
+          }),
+        /--trigger-cooldown-seconds/,
+      );
+    }
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['status-server'],
+          environmentVariables: {
+            STATUS_TRIGGER_COOLDOWN_SECONDS: '-1',
+          },
+          defaultDataDirectory: dataDirectory,
+        }),
+      /STATUS_TRIGGER_COOLDOWN_SECONDS/,
+    );
+  });
+
+  it('parses home-assistant-config strictly from CLI flags and ignores env vars and CONFIG_FILE', () => {
+    const defaultHaConfig = parseApplicationConfiguration({
+      argv: ['home-assistant-config'],
+      environmentVariables: {
+        VERBOSE: 'true',
+        ALLOW_UNAUTHENTICATED_TRIGGER: 'true',
+        STATUS_TRIGGER_FILE: '/should/be/ignored.trigger',
+        DATA_ENCRYPTION_KEY: 'should-be-ignored-in-generator-mode',
+        STATUS_TRIGGER_TOKEN: 'should-be-ignored-in-generator-mode',
+        CONFIG_FILE: path.join(temporaryRoot, 'nonexistent-config.yaml'),
+      },
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(defaultHaConfig.command, 'home-assistant-config');
+    assert.equal(defaultHaConfig.verbose, false);
+    assert.deepEqual(defaultHaConfig.homeAssistantConfig, {
+      prefix: undefined,
+      statusServerBaseUrl: 'http://192.168.1.50:9108',
+      scanIntervalSeconds: 300,
+      includeTrigger: true,
+      allowUnauthenticatedTrigger: false,
+      outputFilePath: undefined,
+    });
+
+    const outputPath = path.join(temporaryRoot, 'packages', 'paperless.yaml');
+    const customizedHaConfig = parseApplicationConfiguration({
+      argv: [
+        'home-assistant-config',
+        '--prefix',
+        'Paperless',
+        '--status-url',
+        'https://backup.local/status-api/',
+        '--scan-interval',
+        '120',
+        '--no-trigger',
+        '--allow-unauthenticated-trigger',
+        '-o',
+        outputPath,
+      ],
+      environmentVariables: {},
+      defaultDataDirectory: dataDirectory,
+    });
+
+    assert.equal(customizedHaConfig.command, 'home-assistant-config');
+    assert.deepEqual(customizedHaConfig.homeAssistantConfig, {
+      prefix: 'Paperless',
+      statusServerBaseUrl: 'https://backup.local/status-api',
+      scanIntervalSeconds: 120,
+      includeTrigger: false,
+      allowUnauthenticatedTrigger: true,
+      outputFilePath: outputPath,
+    });
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['home-assistant-config', 'Paperless'],
+          environmentVariables: {},
+        }),
+      /Unexpected positional argument/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['home-assistant-config', '--output', '   '],
+          environmentVariables: {},
+        }),
+      /Option --output cannot be empty/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['home-assistant-config', '--prefix', 'bad/prefix'],
+          environmentVariables: {},
+        }),
+      /Invalid Home Assistant prefix/,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['home-assistant-config', '--status-url', 'ftp://192.168.1.50:9108'],
+          environmentVariables: {},
+        }),
+      /Only http:\/\/ and https:\/\//,
+    );
+
+    assert.throws(
+      () =>
+        parseApplicationConfiguration({
+          argv: ['home-assistant-config', '--scan-interval', '5'],
+          environmentVariables: {},
+        }),
+      /between 10 and 86400/,
     );
   });
 });

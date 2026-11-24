@@ -1,20 +1,28 @@
-# Home Assistant Package Reference for monitoring `backup-to-proton-drive status-server`.
+# Home Assistant Package Reference for monitoring and triggering `backup-to-proton-drive status-server`.
 #
 # Setup:
 # 1. Start the companion `status` service from compose.yaml (`docker compose up -d`).
-# 2. Replace `192.168.1.50` below with the LAN IP or hostname of your backup host.
-# 3. Include this file as a package in Home Assistant `configuration.yaml`:
+#    To enable the on-demand trigger button (`button.proton_backup_trigger`), also configure
+#    `STATUS_TRIGGER_FILE` + `STATUS_TRIGGER_TOKEN_FILE` on `status` and install
+#    `systemd/backup-to-proton-drive-trigger.path` on the backup host.
+# 2. Verify the `status-server` URL below (http://192.168.1.50:9108) matches the LAN IP or hostname of this backup host.
+# 3. Add the matching trigger bearer token to Home Assistant `secrets.yaml` (required for `POST /trigger`):
+#      proton_backup_trigger_authorization: "Bearer <contents-of-status_trigger_token.txt>"
+# 4. Include this file as a package in Home Assistant `configuration.yaml`:
 #      homeassistant:
 #        packages:
 #          proton_backup: !include packages/proton_backup.yaml
-#    (or merge the top-level `rest:`, `template:`, and `automation:` blocks directly).
-# 4. Restart Home Assistant completely (adding a new `rest:` integration requires a full restart;
-#    YAML reloads alone will not register new REST sensors).
+#    (or merge the top-level `rest:`, `rest_command:`, `template:`, and `automation:` blocks directly).
+# 5. Restart Home Assistant completely (adding new `rest:` or `rest_command:` integrations requires a
+#    full restart; YAML reloads alone will not register them).
 #
-# Naming note:
-# - Home Assistant derives default entity IDs from `name:` (not `unique_id:`). If you rename the
-#   sensors below (for example adding a `Paperless ` prefix), update `sensor.proton_backup_status`
-#   and `binary_sensor.proton_backup_needs_attention` throughout this file to match.
+# Multiple setups / naming note:
+# - Regenerate a prefixed package cleanly without ID collisions across multiple backup hosts:
+#     backup-to-proton-drive home-assistant-config --prefix <name> --status-url <url>
+# - Home Assistant derives default entity IDs from `name:` (not `unique_id:`). If you manually rename
+#   entities below, update `sensor.proton_backup_status`,
+#   `binary_sensor.proton_backup_needs_attention`, and `button.proton_backup_trigger` throughout this
+#   file to match.
 
 rest:
   - resource: http://192.168.1.50:9108/status
@@ -23,8 +31,9 @@ rest:
     sensor:
       # Home Assistant supports `json_attributes:` on `rest:` `sensor:` entities (not `binary_sensor:`).
       # Exposes `status` (`ok` / `warning` / `error` / `never_run`) plus compact summary attributes.
-      # Note: `ageHours` and `checkedAt` are intentionally omitted from json_attributes because
-      # they change on every poll and would unnecessarily inflate the Home Assistant recorder database.
+      # Note: `ageHours`, `checkedAt`, and `triggerCooldownRemainingSeconds` are intentionally omitted
+      # from json_attributes because they change over time without state transitions and would
+      # unnecessarily inflate the Home Assistant recorder database.
       - name: "Proton Backup Status"
         unique_id: proton_backup_status
         value_template: "{{ value_json.status }}"
@@ -38,12 +47,26 @@ rest:
           - durationSeconds
           - errorMessage
           - summary
+          - triggerEnabled
+          - triggerAvailable
+          - triggerPending
+          - triggerAvailableAt
 
       # Timestamp sensor showing when the last backup with complete local uploads finished.
       - name: "Proton Backup Last Success"
         unique_id: proton_backup_last_success
         device_class: timestamp
         value_template: "{{ value_json.lastSuccessAt if value_json.lastSuccessAt else None }}"
+
+rest_command:
+  # Authenticated on-demand trigger command invoked by `button.proton_backup_trigger` or automations.
+  # Omit `headers:` only if `ALLOW_UNAUTHENTICATED_TRIGGER=true` is configured on `status-server`.
+  proton_backup_trigger:
+    url: http://192.168.1.50:9108/trigger
+    method: POST
+    timeout: 15
+    headers:
+      authorization: !secret proton_backup_trigger_authorization
 
 template:
   - binary_sensor:
@@ -58,6 +81,38 @@ template:
             not is_state('sensor.proton_backup_status', 'ok')
             or state_attr('sensor.proton_backup_status', 'problem') == true
           }}
+
+  - button:
+      # Exposes a dashboard/automation button to trigger an on-demand backup via `POST /trigger`.
+      # Automatically becomes `unavailable` while `status-server` is unreachable, trigger is disabled,
+      # a backup is running, a trigger request is pending, or the cooldown period has not elapsed.
+      # Referencing `now()` allows Home Assistant to re-enable the button automatically once
+      # `triggerAvailableAt` passes, even before the next scheduled `rest:` poll.
+      - name: "Proton Backup Trigger"
+        unique_id: proton_backup_trigger
+        icon: mdi:cloud-upload
+        availability: >
+          {% set backup_state = states('sensor.proton_backup_status') %}
+          {% if backup_state in ['unavailable', 'unknown'] %}
+            false
+          {% elif state_attr('sensor.proton_backup_status', 'triggerEnabled') != true %}
+            false
+          {% elif state_attr('sensor.proton_backup_status', 'running') == true or state_attr('sensor.proton_backup_status', 'triggerPending') == true %}
+            false
+          {% elif state_attr('sensor.proton_backup_status', 'triggerAvailable') == true %}
+            true
+          {% else %}
+            {% set available_at = state_attr('sensor.proton_backup_status', 'triggerAvailableAt') %}
+            {{ available_at is string and available_at | length > 0 and now() >= as_datetime(available_at) }}
+          {% endif %}
+        press:
+          - action: rest_command.proton_backup_trigger
+            response_variable: trigger_response
+          - delay:
+              seconds: 2
+          - action: homeassistant.update_entity
+            target:
+              entity_id: sensor.proton_backup_status
 
 automation:
   - id: proton_backup_problem_notify
@@ -144,3 +199,5 @@ automation:
 #       name: "Backup Status"
 #     - entity: sensor.proton_backup_last_success
 #       name: "Last Successful Backup"
+#     - entity: button.proton_backup_trigger
+#       name: "Trigger Backup Now"

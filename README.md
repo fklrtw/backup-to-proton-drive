@@ -17,7 +17,7 @@ One-way, SHA1-verified backup synchronization from one or more local directories
 - **Zero-Bandwidth Rename & Move Detection**: Matches deleted/added local paths by SHA1 digest + node UID and executes remote `renameNode` / `moveNodes` instead of re-uploading moved or renamed files.
 - **File Version History & Streaming SHA1**: Uploads modified files via `getFileRevisionUploader` (creating clean revisions) and hashes local files via Node.js streams without buffering multi-GB files into RAM.
 - **Glob Excludes, Dry-Run & Batched Cleanup**: Supports `.gitignore`-style exclude globs (`--exclude` / `EXCLUDE_PATTERNS` / config file), `--dry-run` previews, batched `trashNodes` cleanup, and optional `--delete-empty-dirs` pruning.
-- **Built-In Telemetry & Home Assistant Integration**: Automatically records aggregate run outcomes and timestamps into `status.json` (`STATUS_FILE`), exposes an unauthenticated read-only HTTP server (`status-server` on port `9108` with `/status` and `/health`), supports `report-failure` for external pre-sync hooks, and includes reference [`examples/run-backup.sh`](./examples/run-backup.sh) and [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) templates.
+- **Built-In Telemetry & Home Assistant Integration**: Automatically records aggregate run outcomes and timestamps into `status.json` (`STATUS_FILE`), exposes an HTTP server (`status-server` on port `9108` with `/status`, `/health`, and optional bearer-token-authenticated `POST /trigger` with running/cooldown guards), supports `report-failure` for external pre-sync hooks, and includes reference [`examples/run-backup.sh`](./examples/run-backup.sh), [`systemd/backup-to-proton-drive-trigger.path`](./systemd/backup-to-proton-drive-trigger.path), and [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) templates.
 - **Hardened Container & Supply Chain**: Multi-stage digest-pinned `node:26-slim` image running as non-root `node`, supporting `read_only: true`, Docker/Podman secrets (`*_FILE`), exact-pinned npm dependencies, SHA-pinned GitHub Actions, `harden-runner` egress auditing, SLSA image provenance attestations, and multi-arch (`linux/amd64`, `linux/arm64`) publishing to GHCR (`ghcr.io`).
 
 ---
@@ -94,15 +94,29 @@ If `/data/session.json` is missing or revoked, the container can authenticate au
 
 ---
 
-## Home Assistant Monitoring & Health Endpoint
+## Home Assistant Monitoring, Health & On-Demand Trigger Endpoint
 
 Every live `sync` writes an unauthenticated, secret-free summary file (`STATUS_FILE`, defaulting to `/data/status.json`) tracking `running`, `status` (`ok`, `warning`, `error`, `never_run`), `lastRunAt`, `lastSuccessAt`, `durationSeconds`, sanitized `errorMessage`, and aggregate transfer counts (no filenames, paths, tokens, or emails).
 
-The `status` service in [`compose.yaml`](./compose.yaml) runs `backup-to-proton-drive status-server` mounting **only** `proton_backup_data:/data:ro` (no encryption key, no backup source mounts) and exposes:
-- `GET /status` / `GET /status.json`: Always returns `200 OK` JSON with dynamically computed `ageHours`, `overdue` (default threshold `26` hours), `problem` (`status !== "ok" || overdue`), and `healthy` (`!problem`) — ideal for Home Assistant's `rest:` integration.
+The `status` service in [`compose.yaml`](./compose.yaml) runs `backup-to-proton-drive status-server` mounting **only** `proton_backup_data:/data:ro` by default (no encryption key, no backup source mounts) and exposes:
+- `GET /status` / `GET /status.json`: Always returns `200 OK` JSON with dynamically computed `ageHours`, `overdue` (default threshold `26` hours), `problem` (`status !== "ok" || overdue`), `healthy` (`!problem`), and trigger state (`triggerEnabled`, `triggerAvailable`, `triggerPending`, `triggerCooldownSeconds`, `triggerCooldownRemainingSeconds`, `triggerAvailableAt`) — ideal for Home Assistant's `rest:` integration.
 - `GET /health`: Returns `200 OK` when `healthy === true` and `503 Service Unavailable` when `problem === true`.
+- `POST /trigger` *(opt-in via `STATUS_TRIGGER_FILE` / `--trigger-file`)*: Atomically creates a trigger file (`202 Accepted`) watched by [`systemd/backup-to-proton-drive-trigger.path`](./systemd/backup-to-proton-drive-trigger.path) to start `backup-to-proton-drive.service`. Requires `Authorization: Bearer <token>` from `STATUS_TRIGGER_TOKEN_FILE` unless `ALLOW_UNAUTHENTICATED_TRIGGER=true` is explicitly set, refuses concurrent triggers while a backup is running or a trigger is already pending (`409 Conflict`), and enforces a configurable post-run/post-trigger cooldown (`STATUS_TRIGGER_COOLDOWN_SECONDS`, default `900` seconds, returning `429 Too Many Requests` with `Retry-After`).
 
-See [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) for a ready-to-use Home Assistant package exposing `binary_sensor.proton_backup_needs_attention` (`device_class: problem`), persistent UI notifications, and a Maintenance dashboard card.
+To enable the trigger endpoint:
+1. Create `./secrets/status_trigger_token.txt` (`openssl rand -base64 32 > ./secrets/status_trigger_token.txt && chmod 0400 ./secrets/status_trigger_token.txt`) and `./trigger` (`mkdir -p trigger && chown 1000:1000 trigger && chmod 700 trigger`), then uncomment the trigger lines in [`compose.yaml`](./compose.yaml).
+2. Copy and enable [`systemd/backup-to-proton-drive-trigger.path`](./systemd/backup-to-proton-drive-trigger.path) alongside [`systemd/backup-to-proton-drive.service`](./systemd/backup-to-proton-drive.service) (`sudo systemctl enable --now backup-to-proton-drive-trigger.path`).
+
+See [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) for a ready-to-use Home Assistant package exposing `binary_sensor.proton_backup_needs_attention` (`device_class: problem`), `button.proton_backup_trigger` (`rest_command` + availability cooldown handling), persistent UI notifications, and a Maintenance dashboard card.
+
+To generate a package customized with your host URL or a unique prefix for multiple backup hosts without entity ID collisions:
+
+```bash
+docker compose run --rm --no-deps status home-assistant-config \
+  --prefix Paperless \
+  --status-url http://192.168.1.50:9108 \
+  > packages/paperless_proton_backup.yaml
+```
 
 > [!NOTE]
 > Keep port `9108` bound to your trusted LAN / firewall and do not expose it publicly without authentication. External pre-sync scripts can also record failures immediately with:
@@ -124,8 +138,9 @@ Mappings are resolved in the following priority order:
 | Flag | Short | Description |
 | :--- | :--- | :--- |
 | `login` | — | Subcommand to interactively authenticate and store `session.json` |
-| `status-server` | — | Subcommand to serve read-only `/status` and `/health` HTTP telemetry |
+| `status-server` | — | Subcommand to serve `/status`, `/health`, and optional `POST /trigger` HTTP telemetry |
 | `report-failure` | — | Subcommand to record an external failure message into `status.json` |
+| `home-assistant-config` | — | Subcommand to generate a Home Assistant YAML package for one backup host |
 | `--map <local>:<remote>` | `-m` | Add a sync mapping (repeatable) |
 | `--config <path>` | `-c` | Path to a YAML or JSON configuration file |
 | `--exclude <glob>` | `-x` | Add a global exclude glob pattern (repeatable) |
@@ -142,6 +157,15 @@ Mappings are resolved in the following priority order:
 | `--status-host <host>` | — | Host interface bound by `status-server` (default `0.0.0.0`; env: `STATUS_SERVER_HOST`) |
 | `--status-port <port>` | — | TCP port bound by `status-server` (`1`-`65535`, default `9108`; env: `STATUS_SERVER_PORT`) |
 | `--status-max-age-hours <h>` | — | Max hours since `lastSuccessAt` before `overdue: true` (default `26`; env: `STATUS_MAX_AGE_HOURS`) |
+| `--trigger-file <path>` | — | Enable `POST /trigger` by atomically writing this trigger file (env: `STATUS_TRIGGER_FILE`) |
+| `--trigger-token-file <path>` | — | Path to >= 32-byte bearer token file protecting `POST /trigger` (env: `STATUS_TRIGGER_TOKEN_FILE`) |
+| `--allow-unauthenticated-trigger` | — | Explicitly opt out of bearer auth on `POST /trigger` (env: `ALLOW_UNAUTHENTICATED_TRIGGER`) |
+| `--trigger-cooldown-seconds <s>` | — | Minimum cooldown seconds after a run/trigger before re-triggering (`0`-`604800`, default `900`; env: `STATUS_TRIGGER_COOLDOWN_SECONDS`) |
+| `--prefix <text>` | — | Prefix prepended to generated Home Assistant names, entity IDs, and `!secret` keys |
+| `--status-url <url>` | — | Base `status-server` URL for `home-assistant-config` (default `http://192.168.1.50:9108`) |
+| `--scan-interval <seconds>` | — | Polling interval in seconds for Home Assistant REST sensor (`10`-`86400`, default `300`) |
+| `--no-trigger` | — | Omit trigger button, `rest_command`, and trigger attributes in generated Home Assistant YAML |
+| `--output <path>` | `-o` | Write generated Home Assistant YAML to a file instead of `stdout` |
 | `--message <text>` | — | Failure description recorded by `report-failure` (env: `FAILURE_MESSAGE`) |
 | `--verbose` | `-v` | Enable detailed credential-safe diagnostic logging across auth, HTTP requests, and sync phases (env: `VERBOSE`) |
 | `--local-dir` / `--remote-dir` | `-l` / `-r` | Legacy single-mapping flags |

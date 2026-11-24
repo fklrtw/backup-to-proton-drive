@@ -36,11 +36,35 @@ export interface HeadlessCredentials {
 }
 
 /**
+ * Options for the `home-assistant-config` package generator subcommand.
+ */
+export interface HomeAssistantConfigOptions {
+  /** Optional instance prefix prepended to `"Proton Backup"` / `"proton_backup"`. */
+  prefix?: string | undefined;
+  /** Normalized `http://` or `https://` base URL of `status-server` without trailing slash. */
+  statusServerBaseUrl: string;
+  /** Polling interval in seconds for the Home Assistant `rest:` sensor (`10`-`86400`). */
+  scanIntervalSeconds: number;
+  /** Whether to include `rest_command`, `button`, and trigger attributes (`false` for `--no-trigger`). */
+  includeTrigger: boolean;
+  /** Whether to omit the `authorization: !secret ...` header from `rest_command`. */
+  allowUnauthenticatedTrigger: boolean;
+  /** Optional output file path; writes to `stdout` when omitted. */
+  outputFilePath?: string | undefined;
+}
+
+/**
  * Fully parsed and validated CLI and environment configuration for an application run.
  */
 export interface ApplicationConfiguration {
   /** Subcommand or mode requested by the caller. */
-  command: 'sync' | 'login' | 'help' | 'status-server' | 'report-failure';
+  command:
+    | 'sync'
+    | 'login'
+    | 'help'
+    | 'status-server'
+    | 'report-failure'
+    | 'home-assistant-config';
   /** Ordered list of local-to-remote directory synchronization mappings. */
   mappings: DirectoryMapping[];
   /** When true, computes and prints planned actions without mutating Proton Drive or cached state. */
@@ -57,8 +81,18 @@ export interface ApplicationConfiguration {
   statusServerPort: number;
   /** Maximum hours permitted since `lastSuccessAt` before `status-server` marks the backup overdue (defaults to `26`). */
   statusMaxAgeHours: number;
+  /** Optional path to a trigger file enabling `POST /trigger` on `status-server`. */
+  statusTriggerFilePath?: string | undefined;
+  /** Bearer token bytes loaded from `STATUS_TRIGGER_TOKEN_FILE` / `--trigger-token-file` to authenticate `POST /trigger`. */
+  statusTriggerToken?: Buffer | undefined;
+  /** Explicit opt-out permitting unauthenticated `POST /trigger` requests when `statusTriggerFilePath` is configured. */
+  allowUnauthenticatedTrigger: boolean;
+  /** Minimum cooldown duration in seconds after a completed/failed run (`lastRunAt`) or trigger acceptance before another trigger is allowed (`0` disables cooldown; default `900`). */
+  statusTriggerCooldownSeconds: number;
   /** Error message recorded when invoking the `report-failure` subcommand. */
   failureMessage?: string | undefined;
+  /** Options configured when invoking the `home-assistant-config` subcommand. */
+  homeAssistantConfig?: HomeAssistantConfigOptions | undefined;
   /** Proton API host name without URL scheme (defaults to `drive-api.proton.me`). */
   apiBaseHost: string;
   /** Application semantic version used for the required `x-pm-appversion` header. */
@@ -456,4 +490,64 @@ export interface EvaluatedRunStatus extends PersistedRunStatus {
   problem: boolean;
   /** Convenience inverse of `problem` (`!problem`). */
   healthy: boolean;
+}
+
+/**
+ * Outcome classification codes returned by `POST /trigger` on `status-server`.
+ */
+export type BackupTriggerOutcomeReason =
+  | 'accepted'
+  | 'already_running'
+  | 'trigger_pending'
+  | 'cooldown'
+  | 'trigger_write_failed';
+
+/**
+ * Live availability and cooldown state for the optional `POST /trigger` endpoint
+ * exposed inside `GET /status` and `GET /health` responses.
+ */
+export interface TriggerAvailabilityStatus {
+  /** Whether `POST /trigger` is enabled via `STATUS_TRIGGER_FILE` / `--trigger-file`. */
+  triggerEnabled: boolean;
+  /** Whether a `POST /trigger` request can currently be accepted immediately. */
+  triggerAvailable: boolean;
+  /** Whether a previously accepted trigger file is still waiting to be processed. */
+  triggerPending: boolean;
+  /** Configured cooldown period in seconds when trigger is enabled, or `null` when disabled. */
+  triggerCooldownSeconds: number | null;
+  /** Remaining cooldown duration in seconds (`0` when ready, `null` when disabled, running, or pending). */
+  triggerCooldownRemainingSeconds: number | null;
+  /** ISO-8601 timestamp when the active cooldown expires, or `null` when not in cooldown. */
+  triggerAvailableAt: string | null;
+}
+
+/**
+ * Combined payload returned by `status-server` for `GET /status`, `GET /status.json`, and `GET /health`.
+ */
+export interface StatusServerPayload extends EvaluatedRunStatus, TriggerAvailabilityStatus {}
+
+/**
+ * JSON response body returned by `POST /trigger` on `status-server`.
+ */
+export interface BackupTriggerResponse {
+  /** True when a new backup trigger file was created (`202 Accepted`). */
+  triggered: boolean;
+  /** Machine-readable outcome classification. */
+  reason: BackupTriggerOutcomeReason;
+  /** Human-readable explanation of the trigger result. */
+  message: string;
+  /** ISO-8601 timestamp when the trigger was requested (present when `triggered === true`). */
+  requestedAt?: string | undefined;
+  /** Whether a backup run is currently active according to `status.json`. */
+  running: boolean;
+  /** ISO-8601 start timestamp of the active run when `running === true`, or `null`. */
+  currentRunStartedAt: string | null;
+  /** Whether a trigger file currently exists on disk awaiting execution. */
+  triggerPending: boolean;
+  /** Configured cooldown duration in seconds. */
+  cooldownSeconds: number;
+  /** Remaining cooldown seconds when rejected with `reason === 'cooldown'`, otherwise `null`. */
+  cooldownRemainingSeconds: number | null;
+  /** ISO-8601 timestamp when cooldown ends when rejected with `reason === 'cooldown'`, otherwise `null`. */
+  availableAt: string | null;
 }

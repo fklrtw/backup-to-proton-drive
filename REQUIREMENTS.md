@@ -52,8 +52,9 @@ Because `@protontech/drive-sdk` intentionally omits login/session flows, [`src/p
 ### Supported CLI Options & Subcommands
 
 - `login`: Interactive credential sign-in and session file persistence.
-- `status-server`: Unauthenticated read-only HTTP telemetry server exposing `/status` (`200` JSON) and `/health` (`200` healthy / `503` problem) for LAN monitoring and Home Assistant.
+- `status-server`: HTTP telemetry server exposing `/status` (`200` JSON), `/health` (`200` healthy / `503` problem), and opt-in `POST /trigger` (`202` accepted / `401` unauthorized / `409` running or pending / `429` cooldown) for LAN monitoring and Home Assistant.
 - `report-failure`: Records an external pre-sync failure description (`--message` / positional / `FAILURE_MESSAGE`) into `STATUS_FILE` while preserving `lastSuccessAt`.
+- `home-assistant-config`: Pure CLI package generator rendering a Home Assistant YAML package for one backup host (`--prefix`, `--status-url`, `--scan-interval`, `--no-trigger`, `--allow-unauthenticated-trigger`, `-o`/`--output`), reading only explicit CLI flags without inheriting environment variables or `CONFIG_FILE`.
 - `--map <local>:<remote>` / `-m` (repeatable): Adds a `localDirectory -> remoteDirectory` mapping. Split on the last `:/` boundary first so local paths containing colons remain valid.
 - `--config <path>` / `-c`: Path to a YAML or JSON configuration file.
 - `--exclude <glob>` / `-x` (repeatable): Global exclude glob patterns merged into all mappings.
@@ -67,6 +68,8 @@ Because `@protontech/drive-sdk` intentionally omits login/session flows, [`src/p
 - `--session-file <path>`, `--state-file <path>`: Override persistent session and event cache paths.
 - `--status-file <path>`: Override unencrypted run telemetry JSON file path (default `status.json` beside `STATE_FILE`; env: `STATUS_FILE`, YAML/JSON: `statusFile`).
 - `--status-host <host>`, `--status-port <port>`, `--status-max-age-hours <hours>`: Configure `status-server` listen address (`0.0.0.0:9108`) and staleness threshold (`26` hours).
+- `--trigger-file <path>`, `--trigger-token-file <path>`, `--allow-unauthenticated-trigger`, `--trigger-cooldown-seconds <seconds>`: Configure opt-in `POST /trigger` on `status-server`, its >= 32-byte file-only bearer token (`STATUS_TRIGGER_TOKEN_FILE`, rejecting raw `STATUS_TRIGGER_TOKEN` env vars) or explicit opt-out (`ALLOW_UNAUTHENTICATED_TRIGGER`), and its post-run/post-trigger cooldown (`0`–`604800`, default `900` seconds).
+- `--prefix <text>`, `--status-url <url>`, `--scan-interval <seconds>`, `--no-trigger`, `-o` / `--output <path>`: Configure `home-assistant-config` output prefixing, `status-server` base URL (`http://` / `https://`), REST polling interval (`10`–`86400`), trigger omission, and optional atomic file output.
 - `--message <text>`: Failure reason recorded by `report-failure` (env: `FAILURE_MESSAGE`).
 - `--verbose` / `-v`: Enables credential-safe diagnostic logging across auth, API calls, and sync phases (env: `VERBOSE`, YAML/JSON: `verbose`).
 - `--local-dir` / `-l`, `--remote-dir` / `-r`, or positional `[LOCAL_DIR] [REMOTE_DIR]`: Legacy single-mapping compatibility (also supports `--local-dir LOCAL REMOTE`).
@@ -137,7 +140,10 @@ Computes a deterministic [`SyncPlan`](./src/types.ts) for every mapping before p
 - **External Failure Reporting (`report-failure`)**:
   - Records external wrapper failures (such as a failed pre-sync `document_exporter` run) into `STATUS_FILE` without requiring directory mappings, encryption keys, or Proton authentication.
 - **Built-In Status HTTP Server (`status-server`)**:
-  - Serves `GET`/`HEAD` `/status` and `/status.json` (`200 OK` JSON with dynamically evaluated `overdue`, `ageHours`, `problem`, and `healthy`) and `/health` (`200` when `healthy`, `503` when `problem`). Designed to run in a dedicated companion container mounting only `/data:ro`.
+  - Serves `GET`/`HEAD` `/status` and `/status.json` (`200 OK` JSON with dynamically evaluated `overdue`, `ageHours`, `problem`, `healthy`, and trigger availability/cooldown fields) and `/health` (`200` when `healthy`, `503` when `problem`). Designed to run in a dedicated companion container mounting `/data:ro` (plus an optional writable `/trigger` spool directory when on-demand triggering is enabled).
+  - When `STATUS_TRIGGER_FILE` (`--trigger-file`) is configured, exposes `POST /trigger` protected by a constant-time SHA-256 comparison against a >= 32-byte bearer token read from `STATUS_TRIGGER_TOKEN_FILE` (unless `ALLOW_UNAUTHENTICATED_TRIGGER=true` is explicitly set). Rejects concurrent runs (`running: true` -> `409 Conflict`), pending trigger files (`409 Conflict`), and cooldown periods measured from `max(lastRunAt, lastTriggerAcceptedAt) + cooldownSeconds` (`429 Too Many Requests` with `Retry-After`), and atomically creates the trigger file (`flag: 'wx'`) watched by [`systemd/backup-to-proton-drive-trigger.path`](./systemd/backup-to-proton-drive-trigger.path) and cleaned up via `ExecStopPost` in [`systemd/backup-to-proton-drive.service`](./systemd/backup-to-proton-drive.service).
+- **Home Assistant Package Generator (`home-assistant-config`, [`src/homeAssistantConfig.ts`](./src/homeAssistantConfig.ts))**:
+  - Generates a self-contained Home Assistant package (`rest:`, `rest_command:`, `template:`, `automation:`) matching [`examples/home-assistant.yaml`](./examples/home-assistant.yaml) byte-for-byte with default options and deriving consistent prefixed display names, slugified entity IDs, `!secret` keys, and notification/Spook IDs when `--prefix` is supplied for multi-host deployments.
 
 ---
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch on-demand backup trigger requests for Proton Drive sync
+
+[Path]
+# Created atomically by `status-server` on POST /trigger (`STATUS_TRIGGER_FILE`).
+# Point this path to the host directory bind-mounted into the `status` container at `/trigger`.
+# `backup-to-proton-drive.service` removes this file via `ExecStopPost` once the run finishes or fails,
+# keeping duplicate triggers blocked (`409 trigger_pending`) during pre-sync hooks and preventing trigger loops.
+PathExists=/opt/backup-to-proton-drive/trigger/backup.trigger
+Unit=backup-to-proton-drive.service
+
+[Install]
+WantedBy=multi-user.target

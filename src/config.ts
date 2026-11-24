@@ -3,6 +3,19 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 
+import {
+  DEFAULT_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS,
+  DEFAULT_HOME_ASSISTANT_STATUS_URL,
+  MAXIMUM_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS,
+  MINIMUM_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS,
+  normalizeHomeAssistantPrefix,
+  normalizeHomeAssistantStatusBaseUrl,
+} from './homeAssistantConfig.ts';
+import {
+  DEFAULT_STATUS_TRIGGER_COOLDOWN_SECONDS,
+  MAXIMUM_STATUS_TRIGGER_COOLDOWN_SECONDS,
+  validateTriggerTokenMaterial,
+} from './statusServer.ts';
 import { validateEncryptionKeyMaterial } from './storageEncryption.ts';
 import type { ApplicationConfiguration, DirectoryMapping, HeadlessCredentials } from './types.ts';
 
@@ -57,6 +70,12 @@ interface RawConfigurationFile {
   statusServerHost?: unknown;
   statusServerPort?: unknown;
   statusMaxAgeHours?: unknown;
+  statusTriggerFile?: unknown;
+  statusTriggerFilePath?: unknown;
+  statusTriggerTokenFile?: unknown;
+  statusTriggerTokenFilePath?: unknown;
+  statusTriggerCooldownSeconds?: unknown;
+  allowUnauthenticatedTrigger?: unknown;
   apiBaseHost?: unknown;
   mappings?: unknown;
 }
@@ -72,14 +91,16 @@ export function getUsageText(): string {
     '  backup-to-proton-drive login [options]',
     '  backup-to-proton-drive status-server [options]',
     '  backup-to-proton-drive report-failure --message <reason> [options]',
+    '  backup-to-proton-drive home-assistant-config [options]',
     '  backup-to-proton-drive [options]',
     '  backup-to-proton-drive --map <LOCAL_DIR>:<REMOTE_DIR> [--map <LOCAL_DIR2>:<REMOTE_DIR2> ...]',
     '  backup-to-proton-drive <LOCAL_DIR> <REMOTE_DIR>',
     '',
     'Commands:',
     '  login                         Interactively authenticate with Proton and persist session file',
-    '  status-server                 Run the read-only HTTP telemetry server exposing status.json',
+    '  status-server                 Run the HTTP telemetry and optional trigger server exposing status.json',
     '  report-failure                Record an external pre-sync failure into status.json',
+    '  home-assistant-config         Generate a Home Assistant package YAML file for one backup host',
     '  (default)                     Run a one-shot SHA1-verified sync across all configured mappings',
     '',
     'Options:',
@@ -99,6 +120,15 @@ export function getUsageText(): string {
     '      --status-host <host>      Interface bound by status-server (default: 0.0.0.0)',
     '      --status-port <port>      TCP port bound by status-server (1-65535, default: 9108)',
     '      --status-max-age-hours <h> Max hours since lastSuccessAt before overdue (default: 26)',
+    '      --trigger-file <path>     Path to trigger file enabling POST /trigger on status-server',
+    '      --trigger-token-file <path> Path to >=32-byte bearer token file protecting POST /trigger',
+    '      --allow-unauthenticated-trigger Explicitly allow unauthenticated POST /trigger requests',
+    '      --trigger-cooldown-seconds <s> Cooldown seconds after run/trigger (0-604800, default: 900)',
+    '      --prefix <text>           Prefix prepended to generated Home Assistant names/IDs',
+    '      --status-url <url>        Base status-server URL for Home Assistant (default: http://192.168.1.50:9108)',
+    '      --scan-interval <seconds> Polling interval for Home Assistant REST sensor (10-86400, default: 300)',
+    '      --no-trigger              Omit trigger button, rest_command, and trigger attributes in HA config',
+    '  -o, --output <path>           Write generated Home Assistant YAML to file instead of stdout',
     '      --message <text>          Failure description recorded by report-failure',
     '  -v, --verbose                 Enable verbose credential-safe diagnostic logging',
     '  -l, --local-dir <path>        Legacy single-mapping local source directory',
@@ -125,6 +155,10 @@ export function getUsageText(): string {
     '  STATUS_SERVER_HOST            Interface bound by status-server (default: 0.0.0.0)',
     '  STATUS_SERVER_PORT            TCP port bound by status-server (default: 9108)',
     '  STATUS_MAX_AGE_HOURS          Max hours since lastSuccessAt before overdue (default: 26)',
+    '  STATUS_TRIGGER_FILE           Path to trigger file enabling POST /trigger on status-server',
+    '  STATUS_TRIGGER_TOKEN_FILE     Secret file (>=32 bytes) authenticating POST /trigger',
+    '  ALLOW_UNAUTHENTICATED_TRIGGER Set true/1 to allow unauthenticated POST /trigger requests',
+    '  STATUS_TRIGGER_COOLDOWN_SECONDS Minimum cooldown seconds after run/trigger (default: 900)',
     '  FAILURE_MESSAGE               Fallback error message for report-failure',
     '  PROTON_USERNAME               Proton username/email for headless login (supports *_FILE)',
     '  PROTON_PASSWORD               Proton password for headless login (supports *_FILE)',
@@ -511,6 +545,15 @@ export function parseApplicationConfiguration(
       'status-host': { type: 'string' },
       'status-port': { type: 'string' },
       'status-max-age-hours': { type: 'string' },
+      'trigger-file': { type: 'string' },
+      'trigger-token-file': { type: 'string' },
+      'allow-unauthenticated-trigger': { type: 'boolean' },
+      'trigger-cooldown-seconds': { type: 'string' },
+      prefix: { type: 'string' },
+      'status-url': { type: 'string' },
+      'scan-interval': { type: 'string' },
+      'no-trigger': { type: 'boolean' },
+      output: { type: 'string', short: 'o' },
       message: { type: 'string' },
       'local-dir': { type: 'string', short: 'l' },
       'remote-dir': { type: 'string', short: 'r' },
@@ -530,6 +573,10 @@ export function parseApplicationConfiguration(
       statusServerHost: '0.0.0.0',
       statusServerPort: 9108,
       statusMaxAgeHours: 26,
+      statusTriggerFilePath: undefined,
+      statusTriggerToken: undefined,
+      allowUnauthenticatedTrigger: false,
+      statusTriggerCooldownSeconds: DEFAULT_STATUS_TRIGGER_COOLDOWN_SECONDS,
       apiBaseHost: 'drive-api.proton.me',
       applicationVersion,
       uploadConcurrency: 5,
@@ -551,6 +598,74 @@ export function parseApplicationConfiguration(
     command = 'status-server';
   } else if (rawSubcommand === 'report-failure') {
     command = 'report-failure';
+  } else if (rawSubcommand === 'home-assistant-config') {
+    command = 'home-assistant-config';
+  }
+
+  if (command === 'home-assistant-config') {
+    if (positionals.length > 1) {
+      throw new Error(
+        `Unexpected positional argument "${positionals[1]}" for home-assistant-config. Pass --prefix <name> instead.`,
+      );
+    }
+
+    normalizeHomeAssistantPrefix(values.prefix);
+    const statusServerBaseUrl = normalizeHomeAssistantStatusBaseUrl(
+      values['status-url'] ?? DEFAULT_HOME_ASSISTANT_STATUS_URL,
+    );
+    const scanIntervalSeconds =
+      parsePositiveIntegerOption(
+        values['scan-interval'],
+        '--scan-interval',
+        MINIMUM_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS,
+        MAXIMUM_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS,
+      ) ?? DEFAULT_HOME_ASSISTANT_SCAN_INTERVAL_SECONDS;
+    const includeTrigger = values['no-trigger'] !== true;
+    const homeAssistantAllowUnauthenticatedTrigger =
+      values['allow-unauthenticated-trigger'] === true;
+
+    let outputFilePath: string | undefined;
+    if (values.output !== undefined) {
+      const trimmedOutputPath = values.output.trim();
+      if (trimmedOutputPath.length === 0) {
+        throw new Error('Option --output cannot be empty.');
+      }
+      outputFilePath = path.resolve(trimmedOutputPath);
+    }
+
+    return {
+      command: 'home-assistant-config',
+      mappings: [],
+      dryRun: false,
+      sessionFilePath: '',
+      stateFilePath: '',
+      statusFilePath: '',
+      statusServerHost: '0.0.0.0',
+      statusServerPort: 9108,
+      statusMaxAgeHours: 26,
+      statusTriggerFilePath: undefined,
+      statusTriggerToken: undefined,
+      allowUnauthenticatedTrigger: homeAssistantAllowUnauthenticatedTrigger,
+      statusTriggerCooldownSeconds: DEFAULT_STATUS_TRIGGER_COOLDOWN_SECONDS,
+      homeAssistantConfig: {
+        prefix: values.prefix,
+        statusServerBaseUrl,
+        scanIntervalSeconds,
+        includeTrigger,
+        allowUnauthenticatedTrigger: homeAssistantAllowUnauthenticatedTrigger,
+        outputFilePath,
+      },
+      apiBaseHost: 'drive-api.proton.me',
+      applicationVersion,
+      uploadConcurrency: 5,
+      localHashConcurrency: 8,
+      remoteScanConcurrency: 6,
+      enableSmallFileUpload: false,
+      verbose: false,
+      dataEncryptionKey: undefined,
+      allowPlaintextState: false,
+      headlessCredentials: {},
+    };
   }
 
   const configFilePath = values.config ?? environmentVariables.CONFIG_FILE;
@@ -668,6 +783,140 @@ export function parseApplicationConfiguration(
       8760,
     ) ??
     26;
+
+  if (
+    environmentVariables.STATUS_TRIGGER_TOKEN !== undefined &&
+    environmentVariables.STATUS_TRIGGER_TOKEN.trim().length > 0
+  ) {
+    throw new Error(
+      'STATUS_TRIGGER_TOKEN environment variable is not supported for security reasons (environment variables are visible in container inspect). Mount a secret file and set STATUS_TRIGGER_TOKEN_FILE or pass --trigger-token-file instead.',
+    );
+  }
+
+  if (
+    parsedConfigFile.statusTriggerFile !== undefined &&
+    typeof parsedConfigFile.statusTriggerFile !== 'string'
+  ) {
+    throw new Error('Configuration field "statusTriggerFile" must be a string path.');
+  }
+  if (
+    parsedConfigFile.statusTriggerFilePath !== undefined &&
+    typeof parsedConfigFile.statusTriggerFilePath !== 'string'
+  ) {
+    throw new Error('Configuration field "statusTriggerFilePath" must be a string path.');
+  }
+  const configStatusTriggerFile =
+    typeof parsedConfigFile.statusTriggerFile === 'string'
+      ? parsedConfigFile.statusTriggerFile
+      : typeof parsedConfigFile.statusTriggerFilePath === 'string'
+        ? parsedConfigFile.statusTriggerFilePath
+        : undefined;
+  const rawStatusTriggerFile =
+    values['trigger-file'] ??
+    environmentVariables.STATUS_TRIGGER_FILE ??
+    configStatusTriggerFile;
+  const statusTriggerFilePath =
+    rawStatusTriggerFile !== undefined && rawStatusTriggerFile.trim().length > 0
+      ? path.resolve(rawStatusTriggerFile.trim())
+      : undefined;
+
+  if (statusTriggerFilePath !== undefined) {
+    if (
+      statusTriggerFilePath === statusFilePath ||
+      statusTriggerFilePath === sessionFilePath ||
+      statusTriggerFilePath === stateFilePath
+    ) {
+      throw new Error(
+        `Trigger file path (${statusTriggerFilePath}) must be distinct from statusFile, sessionFile, and stateFile.`,
+      );
+    }
+  }
+
+  const statusTriggerCooldownSeconds =
+    parsePositiveIntegerOption(
+      values['trigger-cooldown-seconds'],
+      '--trigger-cooldown-seconds',
+      0,
+      MAXIMUM_STATUS_TRIGGER_COOLDOWN_SECONDS,
+    ) ??
+    parsePositiveIntegerOption(
+      environmentVariables.STATUS_TRIGGER_COOLDOWN_SECONDS,
+      'STATUS_TRIGGER_COOLDOWN_SECONDS',
+      0,
+      MAXIMUM_STATUS_TRIGGER_COOLDOWN_SECONDS,
+    ) ??
+    parsePositiveIntegerOption(
+      parsedConfigFile.statusTriggerCooldownSeconds,
+      'config.statusTriggerCooldownSeconds',
+      0,
+      MAXIMUM_STATUS_TRIGGER_COOLDOWN_SECONDS,
+    ) ??
+    DEFAULT_STATUS_TRIGGER_COOLDOWN_SECONDS;
+
+  if (
+    parsedConfigFile.allowUnauthenticatedTrigger !== undefined &&
+    typeof parsedConfigFile.allowUnauthenticatedTrigger !== 'boolean'
+  ) {
+    throw new Error('Configuration field "allowUnauthenticatedTrigger" must be a boolean.');
+  }
+  const configAllowUnauthenticatedTrigger =
+    typeof parsedConfigFile.allowUnauthenticatedTrigger === 'boolean'
+      ? parsedConfigFile.allowUnauthenticatedTrigger
+      : undefined;
+  const allowUnauthenticatedTrigger =
+    values['allow-unauthenticated-trigger'] ??
+    parseBooleanEnvironmentValue(environmentVariables.ALLOW_UNAUTHENTICATED_TRIGGER) ??
+    configAllowUnauthenticatedTrigger ??
+    false;
+
+  if (
+    parsedConfigFile.statusTriggerTokenFile !== undefined &&
+    typeof parsedConfigFile.statusTriggerTokenFile !== 'string'
+  ) {
+    throw new Error('Configuration field "statusTriggerTokenFile" must be a string path.');
+  }
+  if (
+    parsedConfigFile.statusTriggerTokenFilePath !== undefined &&
+    typeof parsedConfigFile.statusTriggerTokenFilePath !== 'string'
+  ) {
+    throw new Error('Configuration field "statusTriggerTokenFilePath" must be a string path.');
+  }
+  const configTriggerTokenFile =
+    typeof parsedConfigFile.statusTriggerTokenFile === 'string'
+      ? parsedConfigFile.statusTriggerTokenFile
+      : typeof parsedConfigFile.statusTriggerTokenFilePath === 'string'
+        ? parsedConfigFile.statusTriggerTokenFilePath
+        : undefined;
+  const triggerTokenFilePath =
+    values['trigger-token-file'] ??
+    environmentVariables.STATUS_TRIGGER_TOKEN_FILE ??
+    configTriggerTokenFile;
+
+  const requiresTriggerToken =
+    command === 'status-server' && statusTriggerFilePath !== undefined;
+
+  let statusTriggerToken: Buffer | undefined;
+  if (
+    requiresTriggerToken &&
+    triggerTokenFilePath !== undefined &&
+    triggerTokenFilePath.trim().length > 0
+  ) {
+    const resolvedTriggerTokenPath = path.resolve(triggerTokenFilePath.trim());
+    if (!fs.existsSync(resolvedTriggerTokenPath)) {
+      throw new Error(`Trigger token file does not exist: ${resolvedTriggerTokenPath}`);
+    }
+    const rawTriggerTokenText = fs.readFileSync(resolvedTriggerTokenPath, 'utf8');
+    statusTriggerToken = validateTriggerTokenMaterial(
+      rawTriggerTokenText,
+      resolvedTriggerTokenPath,
+    );
+  }
+
+  if (requiresTriggerToken && !statusTriggerToken && !allowUnauthenticatedTrigger) {
+    throw new Error(
+      'Trigger bearer token is required when STATUS_TRIGGER_FILE (--trigger-file) is configured on status-server. Mount a secret file (>= 32 bytes, e.g. generated with "openssl rand -base64 32") and set STATUS_TRIGGER_TOKEN_FILE (or --trigger-token-file), or explicitly opt out with ALLOW_UNAUTHENTICATED_TRIGGER=true (--allow-unauthenticated-trigger).',
+    );
+  }
 
   let failureMessage: string | undefined;
   if (command === 'report-failure') {
@@ -957,6 +1206,10 @@ export function parseApplicationConfiguration(
     statusServerHost,
     statusServerPort,
     statusMaxAgeHours,
+    statusTriggerFilePath,
+    statusTriggerToken,
+    allowUnauthenticatedTrigger,
+    statusTriggerCooldownSeconds,
     failureMessage,
     apiBaseHost,
     applicationVersion,

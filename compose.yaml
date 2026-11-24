@@ -80,9 +80,20 @@ services:
     environment:
       STATUS_FILE: /data/status.json
       STATUS_MAX_AGE_HOURS: "26"
+      # Optional: enable authenticated `POST /trigger` (requires writable ./trigger mount + secret + systemd `.path` unit):
+      # STATUS_TRIGGER_FILE: /trigger/backup.trigger
+      # STATUS_TRIGGER_TOKEN_FILE: /run/secrets/status_trigger_token
+      # STATUS_TRIGGER_COOLDOWN_SECONDS: "900"
+      # Only set ALLOW_UNAUTHENTICATED_TRIGGER="true" if you intentionally allow unauthenticated LAN triggers:
+      # ALLOW_UNAUTHENTICATED_TRIGGER: "false"
     volumes:
       # Mount only /data read-only; this companion never holds encryption keys or backup source folders
       - proton_backup_data:/data:ro
+      # Optional writable trigger spool directory (create with: mkdir -p trigger && chown 1000:1000 trigger && chmod 700 trigger):
+      # - ./trigger:/trigger
+    # Optional bearer token secret when STATUS_TRIGGER_FILE is enabled:
+    # secrets:
+    #   - status_trigger_token
     healthcheck:
       test:
         [
@@ -109,3 +120,6 @@ secrets:
   #   file: ./secrets/proton_totp_secret.txt
   # proton_mailbox_password:
   #   file: ./secrets/proton_mailbox_password.txt
+  # Create with: openssl rand -base64 32 > ./secrets/status_trigger_token.txt && chmod 0400 ./secrets/status_trigger_token.txt
+  # status_trigger_token:
+  #   file: ./secrets/status_trigger_token.txt
