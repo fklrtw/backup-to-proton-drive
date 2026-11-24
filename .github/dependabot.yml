@@ -1,0 +1,89 @@
+# Automated dependency updates for backup-to-proton-drive via GitHub Dependabot.
+# Replaces Mend Renovate with weekly Monday 05:00 UTC updates across npm, Docker, and GitHub Actions.
+version: 2
+
+updates:
+  # npm dependencies (runtime + devDependencies)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    # Preserve exact-pinned versions in package.json while updating package-lock.json.
+    versioning-strategy: "increase"
+    # Wait 3 days after npm package publication before raising version update PRs
+    # to reduce supply-chain risk from compromised or quickly yanked releases.
+    # (Security alerts bypass cooldown automatically.)
+    cooldown:
+      default-days: 3
+    labels:
+      - "dependencies"
+    # Use Conventional Commits so production dependency bumps trigger Release Please
+    # patch releases (`fix(deps): ...`) while devDependency bumps stay `chore(deps-dev): ...`.
+    commit-message:
+      prefix: "fix"
+      prefix-development: "chore"
+      include: "scope"
+    # Keep @types/node aligned with Node.js 26.x until an intentional runtime upgrade.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
+    groups:
+      # Group @protontech/drive-sdk and @protontech/crypto updates into one PR so
+      # tightly coupled Proton SDK and OpenPGP cryptographic updates are tested together.
+      proton-sdk:
+        patterns:
+          - "@protontech/*"
+      # Group non-major devDependency updates into a single weekly PR while keeping
+      # major updates separate for careful review.
+      npm-dev-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Dockerfile base images (node:26-slim)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Keep the Node.js runtime image on 26.x until an intentional runtime upgrade.
+    ignore:
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
+
+  # GitHub Actions workflow dependencies (digest-pinned in .github/workflows/*.yml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      # Group all GitHub Actions updates into a single weekly PR to avoid workflow PR noise.
+      github-actions:
+        patterns:
+          - "*"

@@ -33,12 +33,13 @@ For full user-facing specifications, CLI precedence, and operational caveats, se
 | [`scripts/build.mjs`](./scripts/build.mjs) | `esbuild` bundler creating [`dist/index.js`](./dist/index.js) with `openpgp/lightweight` Node resolution |
 | [`test/*.test.ts`](./test) | Automated unit, integration, and bundle smoke tests using `node:test` |
 | [`Dockerfile`](./Dockerfile) | Multi-stage digest-pinned `node:26-slim` non-root container image (`--platform=$BUILDPLATFORM` builder) |
-| [`.node-version`](./.node-version) | Pinned Node.js 26 toolchain version used by CI and Renovate |
+| [`.node-version`](./.node-version) | Pinned Node.js 26 toolchain version used by CI |
 | [`compose.yaml`](./compose.yaml) / [`config.example.yaml`](./config.example.yaml) | Plug-and-play Docker/Podman Compose template (`backup` + `status` companion) and example YAML config |
 | [`systemd/`](./systemd) | Sample `oneshot` service, daily timer, and on-demand `.path` trigger units for Compose + `systemd-creds` |
 | [`examples/`](./examples) | Reference orchestration wrapper (`run-backup.sh`) and Home Assistant monitoring package (`home-assistant.yaml`) |
-| [`.github/workflows/`](./.github/workflows) | SHA-pinned, `harden-runner`-protected CI and `verify`-gated GHCR publish + SLSA attestation workflows |
-| [`.github/renovate.json`](./.github/renovate.json) | Mend Renovate GitHub App configuration (digest pinning, exact npm pinning, Node 26 constraint, 3-day cooldown) |
+| [`.github/workflows/`](./.github/workflows) | SHA-pinned, `harden-runner`-protected CI, Release Please, and `verify`-gated GHCR publish + SLSA attestation workflows |
+| [`.github/dependabot.yml`](./.github/dependabot.yml) | GitHub Dependabot configuration (weekly npm/Docker/Actions updates, exact npm pinning, Node 26 major-update ignore, 3-day npm cooldown) |
+| [`release-please-config.json`](./release-please-config.json) / [`.release-please-manifest.json`](./.release-please-manifest.json) | Manifest-driven Release Please configuration and current version state |
 | [`LICENSE`](./LICENSE) | Full GNU GPLv3 license text (`GPL-3.0-or-later`) |
 
 ### Build, Typecheck & Test Commands
